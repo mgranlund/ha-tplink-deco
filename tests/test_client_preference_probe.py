@@ -8,7 +8,6 @@ import ast
 import asyncio
 import logging
 from pathlib import Path
-import re
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock
@@ -29,7 +28,6 @@ METHODS = {
 CLASS.body = [n for n in CLASS.body if getattr(n, "name", "") in METHODS]
 SCOPE = {
     "asyncio": asyncio,
-    "re": re,
     "async_timeout": SimpleNamespace(timeout=asyncio.timeout),
     "UnexpectedApiException": ApiError,
     "EmptyDataException": type("EmptyDataException", (Exception,), {}),
@@ -66,12 +64,10 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
             return {"data": raw}
 
         api._async_post = AsyncMock(side_effect=post)
-        result = await api.async_probe_client_preferences(
-            client_macs=("AA-BB-CC-DD-EE-FF",)
-        )
-        self.assertEqual(len(result["probes"]), 3)
-        self.assertIs(result["probes"]["client_1.client_list_mac"]["response"], raw)
-        self.assertEqual(api._async_post.await_count, 3)
+        result = await api.async_probe_client_preferences()
+        self.assertEqual(len(result["probes"]), 2)
+        self.assertIs(result["probes"]["mobile_components"]["response"], raw)
+        self.assertEqual(api._async_post.await_count, 2)
         self.assertFalse(api._operation_lock.locked())
         api.async_login.assert_not_called()
         api.async_login_if_needed.assert_not_called()
@@ -80,9 +76,7 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
         api = self.make_api()
         api._stok = None
         api._async_post = AsyncMock()
-        result = await api.async_probe_client_preferences(
-            client_macs=("AA-BB-CC-DD-EE-FF",)
-        )
+        result = await api.async_probe_client_preferences()
         self.assertTrue(
             all(e["status"] == "not_attempted" for e in result["probes"].values())
         )
@@ -95,19 +89,13 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
         api._async_post = AsyncMock(
             side_effect=[ValueError("secret URL"), {"data": raw}, {"data": raw}]
         )
-        result = await api.async_probe_client_preferences(
-            client_macs=("AA-BB-CC-DD-EE-FF",)
-        )
+        result = await api.async_probe_client_preferences()
         self.assertNotIn("secret URL", str(result))
         self.assertEqual(
-            result["probes"]["client_1.client_list_mac"]["error_type"], "ValueError"
+            result["probes"]["mobile_components"]["error_type"], "ValueError"
         )
-        self.assertEqual(
-            result["probes"]["client_1.client_access_mac"]["response"], raw
-        )
-        self.assertEqual(
-            result["probes"]["client_1.client_access_mac"]["status"], "api_error"
-        )
+        self.assertEqual(result["probes"]["component_switches"]["response"], raw)
+        self.assertEqual(result["probes"]["component_switches"]["status"], "api_error")
 
     async def test_forbidden_retry_cannot_login(self):
         api = self.make_api()
@@ -117,7 +105,7 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
             raise SCOPE["ForbiddenException"]()
 
         api._async_post = AsyncMock(side_effect=forbidden)
-        await api.async_probe_client_preferences(client_macs=("AA-BB-CC-DD-EE-FF",))
+        await api.async_probe_client_preferences()
         self.assertEqual(api._async_post.await_count, 1)
         api.async_login.assert_not_called()
         api.async_login_if_needed.assert_not_called()
@@ -135,9 +123,7 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
             timeout=lambda seconds: asyncio.timeout(0.01)
         )
         try:
-            result = await api.async_probe_client_preferences(
-                client_macs=("AA-BB-CC-DD-EE-FF",)
-            )
+            result = await api.async_probe_client_preferences()
         finally:
             SCOPE["async_timeout"] = original
         self.assertFalse(api._operation_lock.locked())
@@ -145,50 +131,42 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
             all(e["status"] == "timeout" for e in result["probes"].values())
         )
 
-    async def test_no_selection_makes_no_requests(self):
+    async def test_exact_allowlisted_requests(self):
+        api = self.make_api()
+        api._async_post = AsyncMock(return_value={"data": {"error_code": 0}})
+        await api.async_probe_client_preferences()
+        expected = (
+            ("/admin/mobile_app/component_list", "mobile"),
+            ("/admin/component_control", "switch_list"),
+        )
+        self.assertEqual(api._async_post.await_count, 2)
+        for call, (endpoint, form) in zip(api._async_post.call_args_list, expected):
+            self.assertEqual(
+                call.args[1],
+                f"http://example.invalid/cgi-bin/luci/;stok=existing{endpoint}",
+            )
+            self.assertEqual(call.kwargs["params"], {"form": form})
+            self.assertEqual(call.kwargs["data"], {"operation": "read", "params": {}})
+
+    async def test_rejects_write_and_unlisted_endpoints(self):
         api = self.make_api()
         api._async_post = AsyncMock()
-        result = await api.async_probe_client_preferences()
-        self.assertEqual(result["probes"], {})
-        self.assertIn("configure", result["reason"])
+        for endpoint, form, payload in (
+            (
+                "/admin/component_control",
+                "switch_list",
+                {"operation": "write", "params": {}},
+            ),
+            ("/admin/client", "client_list", {"operation": "read", "params": {}}),
+            (
+                "/admin/mobile_app/iot_client_mesh",
+                "client_mesh",
+                {"operation": "set", "params": {}},
+            ),
+        ):
+            with self.assertRaises(ValueError):
+                await api._async_probe_client_preferences(endpoint, form, payload)
         api._async_post.assert_not_called()
-
-    async def test_exact_payloads_and_two_client_cap(self):
-        api = self.make_api()
-        api._async_post = AsyncMock(return_value={"data": {"error_code": 0}})
-        result = await api.async_probe_client_preferences(
-            client_macs=("aa:bb:cc:dd:ee:ff", "11-22-33-44-55-66", "77-88-99-AA-BB-CC")
-        )
-        self.assertEqual(api._async_post.await_count, 6)
-        self.assertTrue(result["selection_truncated"])
-        calls = api._async_post.call_args_list
-        for offset, mac in ((0, "AA-BB-CC-DD-EE-FF"), (3, "11-22-33-44-55-66")):
-            for index, (form, params) in enumerate(
-                (
-                    ("client_list", {"device_mac": "default", "mac": mac}),
-                    ("client_access", {"mac": mac}),
-                    ("client_access", {"client_mac": mac}),
-                )
-            ):
-                self.assertEqual(calls[offset + index].kwargs["params"], {"form": form})
-                self.assertEqual(
-                    calls[offset + index].kwargs["data"],
-                    {"operation": "read", "params": params},
-                )
-
-    async def test_invalid_and_duplicate_selection(self):
-        api = self.make_api()
-        api._async_post = AsyncMock(return_value={"data": {"error_code": 0}})
-        result = await api.async_probe_client_preferences(client_macs=("bad", ""))
-        self.assertTrue(
-            all(e["reason"] == "invalid_client_mac" for e in result["probes"].values())
-        )
-        api._async_post.assert_not_called()
-        result = await api.async_probe_client_preferences(
-            client_macs=("AA-BB-CC-DD-EE-FF", "aa:bb:cc:dd:ee:ff")
-        )
-        self.assertEqual(api._async_post.await_count, 3)
-        self.assertEqual(result["probes"]["client_2"]["reason"], "duplicate_client_mac")
 
 
 DIAGNOSTIC_TREE = ast.parse(
@@ -196,7 +174,6 @@ DIAGNOSTIC_TREE = ast.parse(
 )
 DIAGNOSTIC_SCOPE = {
     "__name__": "custom_components.tplink_deco.diagnostics",
-    "CLIENT_PREFERENCE_PROBE_MACS": ("AA-BB-CC-DD-EE-FF",),
     "Any": object,
     "HomeAssistant": object,
     "ConfigEntry": object,
@@ -235,18 +212,20 @@ class DiagnosticBoundaryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("deco_coordinator", result)
         probe = result["client_connection_preference_probe"]
-        self.assertEqual(probe["probe_version"], 3)
+        self.assertEqual(probe["probe_version"], 4)
         self.assertIn("probes", probe)
         return probe
 
     async def test_missing_api_method_still_emits_marker(self):
         result = await self.download(SimpleNamespace())
         self.assertEqual(result["error_type"], "AttributeError")
-        self.assertEqual(result["probes"], {})
+        self.assertTrue(
+            all(e["status"] == "not_attempted" for e in result["probes"].values())
+        )
 
     async def test_partial_result_survives_exception(self):
-        async def fail(report, macs):
-            report["probes"]["client_1.client_list_mac"] = {
+        async def fail(report):
+            report["probes"]["mobile_components"] = {
                 "status": "api_error",
                 "error_code": -1,
             }
@@ -256,11 +235,11 @@ class DiagnosticBoundaryTests(unittest.IsolatedAsyncioTestCase):
             SimpleNamespace(async_probe_client_preferences=fail)
         )
         self.assertEqual(result["status"], "unexpected_exception")
-        self.assertEqual(result["probes"]["client_1.client_list_mac"]["error_code"], -1)
+        self.assertEqual(result["probes"]["mobile_components"]["error_code"], -1)
         self.assertNotIn("secret URL", str(result))
 
     async def test_boundary_timeout_still_emits_marker(self):
-        async def slow(report, macs):
+        async def slow(report):
             await asyncio.sleep(10)
 
         original = DIAGNOSTIC_SCOPE["async_timeout"]
@@ -287,7 +266,7 @@ class DiagnosticBoundaryTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_external_cancellation_propagates(self):
-        async def cancel(report, macs):
+        async def cancel(report):
             raise asyncio.CancelledError()
 
         with self.assertRaises(asyncio.CancelledError):

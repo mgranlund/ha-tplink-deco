@@ -1,118 +1,108 @@
-# Temporary client preference probe, version 3
+# Temporary client preference discovery — version 4
 
-Diagnostic discovery only. No inventory schema, entities, MQTT, node topology,
-manifest version or releases are changed. The probe uses the existing HA API
-object, operation lock, encryption/decryption, transport and retry helper. It
-never calls login. Do not create another owner-authenticated session to test it.
+This is capability discovery, not a confirmed preference getter. Production
+inventory, node topology, entities, MQTT and manifest version remain unchanged.
 
-## Evidence and limits
+## Findings and rejected hypotheses
 
-Live version-2 diagnostics returned successful `client_list` and `client_access`
-responses without an identifiable configured client preference. The repeated
-`client_access.device_id` must not be treated as the preferred Deco, and
-`client_mesh` does not identify a preferred node.
+Live v3 testing disproved all three selectors for this firmware:
 
-The next experiment tests MAC selectors on those established read forms.
-These selectors are hypotheses, not a verified per-client API schema.
+- `/admin/client?form=client_list`, `params.mac` with `device_mac: default`.
+- `/admin/client?form=client_access`, `params.mac`.
+- `/admin/client?form=client_access`, `params.client_mac`.
 
-- Read-operation source: https://github.com/oliver006/deco/blob/main/admin_client.go
-- Feature description: https://www.tp-link.com/us/support/faq/3480/
+All returned broad lists despite success codes. Version 4 removes those probes.
+The repeated `client_access.device_id` is not evidence of a preferred client node.
+`client_mesh` does not identify a preferred node either.
 
-No substantiated dedicated preference/binding form was found in the sources
-checked. A successful response can mean the firmware ignored an unknown selector.
-Do not infer a preference from `device_id`, `client_mesh`, or current association.
+The integration code itself contains no separate client preference read. Offline
+inspection of the public wrapper at commit
+`939be4cab158cf88ceef63655282742b8323ac87` found a mobile-app namespace:
 
-## Exact requests
+- `/admin/mobile_app/device?form=device_prefer_set`, operation `set` only.
+- `/admin/mobile_app/iot_client_mesh?form=client_mesh`, operation `set` only.
 
-All requests go to `/admin/client` through the existing authenticated URL.
-For each selected client MAC `M`:
+These are naming leads, not established read interfaces or proof of semantics.
+Neither is called. No guessed read operation is sent to a set-only form.
+The cloud `system` bind/unbind forms concern cloud binding, not proven client
+node preferences, and are excluded. Client isolation, DHCP lease and blacklist
+forms are also not evidence of a preferred node getter.
 
-| Result key suffix | Form | Decrypted payload |
-| --- | --- | --- |
-| `client_list_mac` | `client_list` | `{"operation":"read","params":{"device_mac":"default","mac":"M"}}` |
-| `client_access_mac` | `client_access` | `{"operation":"read","params":{"mac":"M"}}` |
-| `client_access_client_mac` | `client_access` | `{"operation":"read","params":{"client_mac":"M"}}` |
+Source:
+https://github.com/oliver006/deco/blob/939be4cab158cf88ceef63655282742b8323ac87/admin_mobile_app.go
 
-`device_mac` selects a Deco in the established client-list call, so it remains
-`default`; it is not replaced with a client MAC. The `mac` hypothesis follows
-client record naming; `client_mac` tests an explicit client identifier.
+The wrapper and its mock tests list request paths and operations; they do not
+prove support on this firmware, provide firmware handler source, or establish
+which call the current app makes when opening Connection Preference.
 
-MACs are normalized to uppercase hyphen notation. At most two selections and six
-requests are allowed. Invalid and duplicate selections are recorded and skipped.
-No selection means no requests. Each request has three seconds, including waiting
-for the lock, inside a 20-second overall diagnostics timeout. Timeout retries are
-disabled. The shared retry helper cannot initiate login through this probe.
+## Proposed and implemented reads
 
-## Install and select a known client
+| Result key | Endpoint | Form | Decrypted payload |
+| --- | --- | --- | --- |
+| `mobile_components` | `/admin/mobile_app/component_list` | `mobile` | `{"operation":"read","params":{}}` |
+| `component_switches` | `/admin/component_control` | `switch_list` | `{"operation":"read","params":{}}` |
 
-1. Back up the installed `api.py` and `diagnostics.py` outside the integration
-   folder. Start from the existing `v3.10.1-home.2` installation with its probe.
-2. Download **Raw** `custom_components/tplink_deco/api.py` and `diagnostics.py`
-   from this probe commit. Replace the corresponding files in
-   `/homeassistant/custom_components/tplink_deco/`. Do not save GitHub HTML.
-3. In the installed `diagnostics.py`, find:
+The first may reveal mobile component names/versions. The second may expose
+component configuration flags. These purposes are inferred from names, not
+confirmed response schemas. The paths and `read` operations are source-listed;
+empty `params` support on this firmware is unconfirmed.
 
-   ```python
-   CLIENT_PREFERENCE_PROBE_MACS: tuple[str, ...] = ()
-   ```
+Sources:
+- https://github.com/oliver006/deco/blob/939be4cab158cf88ceef63655282742b8323ac87/admin_mobile_app.go#L308
+- https://github.com/oliver006/deco/blob/939be4cab158cf88ceef63655282742b8323ac87/admin_component_control.go
+- https://github.com/oliver006/deco/blob/939be4cab158cf88ceef63655282742b8323ac87/admin_request.go
 
-   Change it locally to the MAC of a client whose specified setting you know:
+The temporary low-level helper accepts only these exact endpoint/form/payload
+combinations. Both use the integration's existing API object, encryption,
+transport, operation lock and retry helper. No login is initiated; unavailable
+authentication is recorded and skipped. A transport auth failure may clear the
+existing session as usual; normal polling remains responsible for recovery.
+There are no timeout retries. Each request has four seconds including lock wait,
+inside the diagnostics module's ten-second overall limit.
 
-   ```python
-   CLIENT_PREFERENCE_PROBE_MACS: tuple[str, ...] = (
-       "AA-BB-CC-DD-EE-FF",  # Replace this example with your actual client MAC.
-   )
-   ```
+## Install and test
 
-   Optionally add a second MAC for a known automatic client. Use the client MAC
-   in HA, not the Deco MAC. Keep private MACs out of commits to the public fork.
-4. Restart Home Assistant itself through **Settings → System → Restart Home
-   Assistant**. Wait for Deco entities to update successfully and keep the
-   selected clients online. No preference change or owner login is necessary.
-5. Open **Settings → Devices & services → TP-Link Deco → integration entry's
-   three-dot menu → Download diagnostics**. Allow up to 20 additional seconds.
+1. Back up installed `api.py` and `diagnostics.py` outside the integration folder.
+2. Download **Raw** versions of both files from this commit and replace:
+   `/homeassistant/custom_components/tplink_deco/api.py` and
+   `/homeassistant/custom_components/tplink_deco/diagnostics.py`.
+3. No client MAC tuple is needed. Replacing diagnostics removes v3's local MAC
+   configuration. Do not carry that selection code into version 4.
+4. Restart Home Assistant itself. Wait for successful Deco entity updates.
+5. Use **Settings → Devices & services → TP-Link Deco → integration entry's
+   three-dot menu → Download diagnostics**. No app owner login is needed.
 
-The manifest still reports `3.10.1-home.2`; the marker below identifies the probe.
+Search for `data.client_connection_preference_probe` (or the probe key if the
+HA wrapper differs). Expect:
 
-## Inspect
+- `probe_version: 4`
+- `purpose: capability_discovery_not_preference_getter`
+- `budget_seconds: 10`, `request_timeout_seconds: 4`
+- `probes.mobile_components`
+- `probes.component_switches`
 
-Search for `client_connection_preference_probe`, normally under `data`.
-Expect `probe_version: 3`, `diagnostics_module`, `selected_client_macs`,
-`max_clients: 2`, `request_timeout_seconds: 3`, `budget_seconds: 20`,
-`selector_support: "unconfirmed"`, `status`, and `probes`.
+Both entries include endpoint, form, request, attempted flag and status. Raw
+`response` envelopes retain decrypted errors. Statuses are `not_attempted`,
+`response_received`, `api_error`, `timeout` or `unexpected_exception`. Exception
+types are serialized without potentially credential-bearing exception strings.
+Boundary errors retain the diagnostics-owned version marker and partial results.
+External cancellation still propagates normally.
 
-For selection 1, the `probes` object contains these literal keys (the dot is part
-of each key, not an additional JSON nesting level):
+Look for component names or versions mentioning client preference, steering,
+binding or mesh. A feature flag is not a client's configured preference. Missing
+such a flag does not prove the feature is unavailable. If the response supplies
+no useful lead, the next evidence needed is a relevant firmware handler or app
+request/schema reference; do not resume the disproven selector guesses.
 
-- `client_1.client_list_mac`
-- `client_1.client_access_mac`
-- `client_1.client_access_client_mac`
+Keep raw diagnostics private. Existing credential-key redaction is applied;
+unknown response fields are retained for discovery.
 
-Selection 2 uses the prefix `client_2`. Each valid selection's entries are
-initialized before network calls. Inspect `request`, `client_mac`, `response`,
-`attempted`, `status`, and any `error_code`, `error_type` or `reason`.
+## Remove and validation
 
-States are `not_attempted`, `response_received`, `api_error`, `timeout`, and
-`unexpected_exception`. Top-level `completed` means orchestration finished, not
-that the preference was found. Empty selection produces `not_attempted` with
-`reason: "configure_CLIENT_PREFERENCE_PROBE_MACS_in_diagnostics_py"` and empty
-`probes`. A missing/mismatched API method produces a boundary error while keeping
-the version marker. External cancellation still cancels a download normally.
+Restore backups and restart HA, or reinstall `v3.10.1-home.2`. The temporary build
+does not bump the manifest version or create a release.
 
-Compare returned client MACs and envelopes across the three requests and against
-version 2. Responses containing unrelated clients may indicate ignored filters.
-Even a single-client response needs comparison with the known app setting before
-any field can be called a configured preference.
-
-Raw client identifiers are retained for correlation; existing credential-key
-redaction is applied. Exception types, not potentially credential-bearing
-exception strings, are serialized. Keep downloaded diagnostics private.
-
-## Remove and checks
-
-Restore the backed-up files and restart HA, or reinstall `v3.10.1-home.2`.
-To change test clients, edit the local tuple and restart HA again.
-
-Run `python -m unittest discover -s tests`. The focused checks compile actual
-probe/retry and diagnostics hook functions with mocked transport/HA context;
-they do not contact a Deco or constitute a full HA/firmware test.
+`python -m unittest discover -s tests` checks actual API and diagnostics functions
+with mocked transport/HA context. It covers exact allowed reads, rejection of
+writes/unlisted paths, auth skips, independent failures, timeout cleanup and
+marker persistence. It is not a live firmware or full HA test.

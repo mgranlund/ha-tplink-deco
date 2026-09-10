@@ -314,67 +314,30 @@ class TplinkDecoApi:
         check_data_error_code(context, data)
         return data
 
-    async def async_probe_client_preferences(
-        self, report: dict | None = None, client_macs: tuple[str, ...] = ()
-    ) -> dict:
-        """Temporary MAC-scoped diagnostics reads; never initiate authentication."""
+    async def async_probe_client_preferences(self, report: dict | None = None) -> dict:
+        """Temporary capability discovery; never initiate authentication."""
         if report is None:
-            report = {"probe_version": 3, "probes": {}}
+            report = {"probe_version": 4, "probes": {}}
         probes = report["probes"]
-        requests = []
-        seen = set()
-        # A hard cap and strict validation prevent accidental network-wide sweeps.
-        for index, value in enumerate(client_macs[:2]):
-            selection = f"client_{index + 1}"
-            mac = value.upper().replace(":", "-") if isinstance(value, str) else ""
-            if not re.fullmatch(r"(?:[0-9A-F]{2}-){5}[0-9A-F]{2}", mac):
-                probes[selection] = {
-                    "status": "not_attempted",
-                    "attempted": False,
-                    "reason": "invalid_client_mac",
-                }
-                continue
-            if mac in seen:
-                probes[selection] = {
-                    "status": "not_attempted",
-                    "attempted": False,
-                    "reason": "duplicate_client_mac",
-                }
-                continue
-            seen.add(mac)
-            candidates = (
-                (
-                    "client_list_mac",
-                    "client_list",
-                    {"device_mac": "default", "mac": mac},
-                ),
-                ("client_access_mac", "client_access", {"mac": mac}),
-                ("client_access_client_mac", "client_access", {"client_mac": mac}),
-            )
-            for candidate, form, params in candidates:
-                key = f"{selection}.{candidate}"
-                payload = {"operation": "read", "params": params}
-                probes[key] = {
-                    "endpoint": "/admin/client",
-                    "form": form,
-                    "request": payload,
-                    "client_mac": mac,
-                    "status": "not_attempted",
-                    "attempted": False,
-                    "selector_support": "unconfirmed",
-                }
-                requests.append((key, form, payload))
-        if not client_macs:
-            report["reason"] = (
-                "configure_CLIENT_PREFERENCE_PROBE_MACS_in_diagnostics_py"
-            )
-        if len(client_macs) > 2:
-            report["selection_truncated"] = True
-        for key, form, payload in requests:
+        requests = (
+            ("mobile_components", "/admin/mobile_app/component_list", "mobile"),
+            ("component_switches", "/admin/component_control", "switch_list"),
+        )
+        payload = {"operation": "read", "params": {}}
+        for key, endpoint, form in requests:
+            probes[key] = {
+                "endpoint": endpoint,
+                "form": form,
+                "request": payload,
+                "status": "not_attempted",
+                "attempted": False,
+                "purpose": "capability_discovery_not_preference_getter",
+            }
+        for key, endpoint, form in requests:
             entry = probes[key]
             try:
-                # Three seconds per request includes waiting for the shared lock.
-                async with async_timeout.timeout(3):
+                # Four seconds per request includes waiting for the shared lock.
+                async with async_timeout.timeout(4):
                     async with self._operation_lock:
                         if (
                             not all(
@@ -392,6 +355,7 @@ class TplinkDecoApi:
                         entry["attempted"] = True
                         response = await self._async_call_with_retry(
                             self._async_probe_client_preferences,
+                            endpoint,
                             form,
                             payload,
                             timeout_error_retries=0,
@@ -416,8 +380,15 @@ class TplinkDecoApi:
                 )
         return report
 
-    async def _async_probe_client_preferences(self, form: str, payload: dict) -> dict:
-        """Use only existing authentication, including on a helper retry."""
+    async def _async_probe_client_preferences(
+        self, endpoint: str, form: str, payload: dict
+    ) -> dict:
+        """Use only allowlisted reads and existing authentication on retries."""
+        if (endpoint, form) not in (
+            ("/admin/mobile_app/component_list", "mobile"),
+            ("/admin/component_control", "switch_list"),
+        ) or payload != {"operation": "read", "params": {}}:
+            raise ValueError("Unsupported diagnostic request")
         if (
             not all((self._stok, self._cookie, self._aes_key_bytes, self._aes_iv_bytes))
             or self._seq is None
@@ -426,7 +397,7 @@ class TplinkDecoApi:
         context = f"Temporary client preference probe {form}"
         response_json = await self._async_post(
             context,
-            f"{self._host}/cgi-bin/luci/;stok={self._stok}/admin/client",
+            f"{self._host}/cgi-bin/luci/;stok={self._stok}{endpoint}",
             params={"form": form},
             data=self._encode_payload(payload),
         )

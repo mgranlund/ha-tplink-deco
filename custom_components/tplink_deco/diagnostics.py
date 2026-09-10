@@ -98,30 +98,24 @@ def _client_diagnostics(
     }
 
 
-# Temporary, local-only selection: add one known specified client and optionally
-# one automatic client here. Use MACs from HA. Do not commit private MACs upstream.
-CLIENT_PREFERENCE_PROBE_MACS: tuple[str, ...] = ()
-
-
 async def _async_client_preference_diagnostics(coordinator) -> dict[str, Any]:
     """Always build the marker here, independently of the installed API module."""
     report = {
-        "probe_version": 3,
+        "probe_version": 4,
         "diagnostics_module": __name__,
         "temporary": True,
-        "budget_seconds": 20,
+        "budget_seconds": 10,
         "status": "not_attempted",
-        "selected_client_macs": list(CLIENT_PREFERENCE_PROBE_MACS[:2]),
-        "max_clients": 2,
-        "request_timeout_seconds": 3,
-        "selector_support": "unconfirmed",
-        "probes": {},
+        "request_timeout_seconds": 4,
+        "purpose": "capability_discovery_not_preference_getter",
+        "probes": {
+            key: {"status": "not_attempted", "attempted": False}
+            for key in ("mobile_components", "component_switches")
+        },
     }
     try:
-        async with async_timeout.timeout(20):
-            await coordinator.api.async_probe_client_preferences(
-                report, CLIENT_PREFERENCE_PROBE_MACS
-            )
+        async with async_timeout.timeout(10):
+            await coordinator.api.async_probe_client_preferences(report)
         report["status"] = "completed" if report["probes"] else "not_attempted"
         return async_redact_data(report, TO_REDACT)
     except asyncio.TimeoutError as err:
@@ -140,7 +134,7 @@ async def _async_client_preference_diagnostics(coordinator) -> dict[str, Any]:
         return async_redact_data(report, TO_REDACT)
     except Exception as err:
         return {
-            "probe_version": 3,
+            "probe_version": 4,
             "diagnostics_module": __name__,
             "status": "unexpected_exception",
             "error_type": type(err).__name__,
