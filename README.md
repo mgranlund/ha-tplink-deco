@@ -437,3 +437,10 @@ reservation reads fail the action rather than claiming there are no reservations
 Clients are intentionally omitted. MQTT publishing stays in your automation.
 Inventory contains network identifiers; diagnostics retain their existing
 privacy-preserving field allowlist and do not fetch or include this inventory.
+
+Per-client Connection Preference (Preferred Deco / Specified Connection) is
+intentionally unsupported. No getter has been established through the local HTTP
+API used by this integration. The Android app reads this state through a separate
+TMP transport with its own authenticated session, which this integration does not
+implement. This limitation does not affect the node-level specified parent
+resolution described above.

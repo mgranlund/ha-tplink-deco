@@ -1,10 +1,8 @@
 """Diagnostics support for TP-Link Deco."""
 
-import asyncio
 from datetime import datetime
 from typing import Any
 
-import async_timeout
 from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST
@@ -98,52 +96,6 @@ def _client_diagnostics(
     }
 
 
-async def _async_client_preference_diagnostics(coordinator) -> dict[str, Any]:
-    """Always build the marker here, independently of the installed API module."""
-    report = {
-        "probe_version": 4,
-        "diagnostics_module": __name__,
-        "temporary": True,
-        "budget_seconds": 10,
-        "status": "not_attempted",
-        "request_timeout_seconds": 4,
-        "purpose": "capability_discovery_not_preference_getter",
-        "probes": {
-            key: {"status": "not_attempted", "attempted": False}
-            for key in ("mobile_components", "component_switches")
-        },
-    }
-    try:
-        async with async_timeout.timeout(10):
-            await coordinator.api.async_probe_client_preferences(report)
-        report["status"] = "completed" if report["probes"] else "not_attempted"
-        return async_redact_data(report, TO_REDACT)
-    except asyncio.TimeoutError as err:
-        report["status"] = "timeout"
-        report["error_type"] = type(err).__name__
-        for entry in report["probes"].values():
-            if entry.get("status") == "not_attempted":
-                entry["reason"] = "overall_budget_exhausted"
-                if entry.get("attempted"):
-                    entry["status"] = "timeout"
-    except Exception as err:
-        report["status"] = "unexpected_exception"
-        report["error_type"] = type(err).__name__
-    # Keep partial results, but do not let a redaction failure hide the marker.
-    try:
-        return async_redact_data(report, TO_REDACT)
-    except Exception as err:
-        return {
-            "probe_version": 4,
-            "diagnostics_module": __name__,
-            "status": "unexpected_exception",
-            "error_type": type(err).__name__,
-            "stage": "redaction",
-            "probes": {},
-            "reason": "results_unavailable",
-        }
-
-
 async def async_get_config_entry_diagnostics(
     hass: HomeAssistant, config_entry: ConfigEntry
 ) -> dict[str, Any]:
@@ -165,10 +117,6 @@ async def async_get_config_entry_diagnostics(
             "data": async_redact_data(config_entry.data, TO_REDACT),
             "options": async_redact_data(config_entry.options, TO_REDACT),
         },
-        # Temporary discovery data retains client identifiers for correlation.
-        "client_connection_preference_probe": await _async_client_preference_diagnostics(
-            deco_coordinator
-        ),
         "deco_coordinator": {
             **_coordinator_diagnostics(deco_coordinator),
             "paused": deco_coordinator.paused,
