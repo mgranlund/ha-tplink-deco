@@ -314,6 +314,62 @@ class TplinkDecoApi:
         check_data_error_code(context, data)
         return data
 
+    async def async_probe_client_preferences(self) -> dict:
+        """Temporary diagnostics-only reads; never initiate authentication."""
+        probes = {}
+        requests = (
+            ("client_list", {"operation": "read", "params": {"device_mac": "default"}}),
+            ("client_access", {"operation": "read"}),
+        )
+        try:
+            # Includes time waiting for polling to release the operation lock.
+            async with async_timeout.timeout(15):
+                for form, payload in requests:
+                    entry = {
+                        "endpoint": "/admin/client",
+                        "form": form,
+                        "request": payload,
+                    }
+                    probes[form] = entry
+                    try:
+                        async with self._operation_lock:
+                            entry["response"] = await self._async_call_with_retry(
+                                self._async_probe_client_preferences,
+                                form,
+                                payload,
+                                timeout_error_retries=0,
+                            )
+                        entry["status"] = "response_received"
+                    except Exception as err:
+                        # Exception strings may contain an authenticated URL.
+                        entry.update(status="error", error_type=type(err).__name__)
+        except asyncio.TimeoutError:
+            for form, payload in requests:
+                entry = probes.setdefault(
+                    form,
+                    {"endpoint": "/admin/client", "form": form, "request": payload},
+                )
+                if "status" not in entry:
+                    entry["status"] = "probe_budget_exhausted"
+        return {"temporary": True, "budget_seconds": 15, "probes": probes}
+
+    async def _async_probe_client_preferences(self, form: str, payload: dict) -> dict:
+        """Use only existing authentication, including on a helper retry."""
+        if (
+            not all((self._stok, self._cookie, self._aes_key_bytes, self._aes_iv_bytes))
+            or self._seq is None
+        ):
+            raise UnexpectedApiException("Existing authentication unavailable")
+        context = f"Temporary client preference probe {form}"
+        response_json = await self._async_post(
+            context,
+            f"{self._host}/cgi-bin/luci/;stok={self._stok}/admin/client",
+            params={"form": form},
+            data=self._encode_payload(payload),
+        )
+        # Preserve the complete decrypted envelope, including API error codes.
+        return self._decrypt_data(context, response_json["data"])
+
     def _generate_aes_key_and_iv(self):
         # TPLink requires key and IV to be a 16 digit number (no leading 0s)
         self._aes_key = secrets.randbelow(MAX_AES_KEY - MIN_AES_KEY) + MIN_AES_KEY

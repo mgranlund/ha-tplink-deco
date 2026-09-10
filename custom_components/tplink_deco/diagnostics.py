@@ -117,6 +117,10 @@ async def async_get_config_entry_diagnostics(
             "data": async_redact_data(config_entry.data, TO_REDACT),
             "options": async_redact_data(config_entry.options, TO_REDACT),
         },
+        # Temporary discovery data retains client identifiers for correlation.
+        "client_connection_preference_probe": async_redact_data(
+            await deco_coordinator.api.async_probe_client_preferences(), TO_REDACT
+        ),
         "deco_coordinator": {
             **_coordinator_diagnostics(deco_coordinator),
             "paused": deco_coordinator.paused,
