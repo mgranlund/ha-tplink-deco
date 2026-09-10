@@ -20,7 +20,9 @@ rechecks existing authentication and cannot call login. If the transport clears
 authentication, the probe skips further requests; normal integration polling
 remains responsible for its usual authentication recovery.
 
-The total budget is 15 seconds, including lock acquisition. Failed forms do not
+Version 2 adds a diagnostics-owned `probe_version: 2` marker and a boundary
+error handler. Each form has a seven-second limit, including lock acquisition,
+inside an overall 15-second diagnostics budget. Failed forms do not
 prevent the next form from being attempted within that budget. Outer transport
 errors are recorded as exception types only; decrypted API errors remain in the
 raw response. External task cancellation is propagated normally.
@@ -49,10 +51,36 @@ raw response. External task cancellation is propagated normally.
    Inspect `probes.client_list.response` and `probes.client_access.response`.
    Each entry includes `request`, `form`, `endpoint`, and `status`.
 
-`response_received` means a response was decrypted, not necessarily API success.
-Check `error_code`/`errorcode` and `result`. An `error` entry includes `error_type`;
-`probe_budget_exhausted` means the budget expired, possibly while waiting for
-polling. Missing preference fields or an unsupported form are inconclusive.
+Expected keys are `probe_version` (2), `diagnostics_module`, `temporary`,
+`budget_seconds`, `status`, and `probes.client_list` / `probes.client_access`.
+The section is initialized by diagnostics itself even if the API method is missing.
+Boundary failures include `error_type`; partial per-form results are preserved.
+Exception types are serialized rather than exception strings that may contain
+credentials or authenticated URLs.
+
+Per-form states:
+
+- `not_attempted`: no call made (for example, authentication unavailable).
+- `response_received`: decrypted response without a nonzero API error code.
+- `api_error`: decrypted nonzero error (`error_code` and raw `response` retained),
+  or an API exception raised by the existing transport (`error_type`).
+- `timeout`: per-form timeout, including time waiting for the lock.
+- `unexpected_exception`: other exception, with `error_type`.
+
+`attempted` identifies whether the API read was invoked. Top-level `completed`
+means orchestration finished, even if both forms failed. Boundary `timeout` or
+`unexpected_exception` leaves unattempted entries present. External cancellation
+still cancels the download normally; unrelated failures in normal diagnostics
+can still fail the download.
+
+If the marker is absent from a successful fresh download, this patched hook did
+not supply that section (or the downloaded JSON was subsequently transformed).
+The original v1 hook also unconditionally included the key: an awaited exception
+would fail the download, not silently omit the key. Check the downloaded file's
+integration domain and the module loaded by the running HA instance. Confirming
+files on disk alone cannot prove which code handled a download.
+
+Missing preference fields or an unsupported form are inconclusive.
 
 Raw client identifiers, names and IP addresses are intentionally retained for
 correlation. Credential keys use the existing diagnostics redaction set. Treat

@@ -314,44 +314,71 @@ class TplinkDecoApi:
         check_data_error_code(context, data)
         return data
 
-    async def async_probe_client_preferences(self) -> dict:
-        """Temporary diagnostics-only reads; never initiate authentication."""
-        probes = {}
+    async def async_probe_client_preferences(self, report: dict | None = None) -> dict:
+        """Temporary diagnostics-only reads; never initiate authentication.
+
+        Mutate a caller-owned report so partial results survive a boundary error.
+        """
+        if report is None:
+            report = {"probe_version": 2, "probes": {}}
         requests = (
             ("client_list", {"operation": "read", "params": {"device_mac": "default"}}),
             ("client_access", {"operation": "read"}),
         )
-        try:
-            # Includes time waiting for polling to release the operation lock.
-            async with async_timeout.timeout(15):
-                for form, payload in requests:
-                    entry = {
-                        "endpoint": "/admin/client",
-                        "form": form,
-                        "request": payload,
-                    }
-                    probes[form] = entry
-                    try:
-                        async with self._operation_lock:
-                            entry["response"] = await self._async_call_with_retry(
-                                self._async_probe_client_preferences,
-                                form,
-                                payload,
-                                timeout_error_retries=0,
+        probes = report["probes"]
+        for form, payload in requests:
+            probes[form] = {
+                "endpoint": "/admin/client",
+                "form": form,
+                "request": payload,
+                "status": "not_attempted",
+                "attempted": False,
+            }
+        for form, payload in requests:
+            entry = probes[form]
+            try:
+                # Seven seconds per form includes waiting for the shared lock.
+                async with async_timeout.timeout(7):
+                    async with self._operation_lock:
+                        if (
+                            not all(
+                                (
+                                    self._stok,
+                                    self._cookie,
+                                    self._aes_key_bytes,
+                                    self._aes_iv_bytes,
+                                )
                             )
-                        entry["status"] = "response_received"
-                    except Exception as err:
-                        # Exception strings may contain an authenticated URL.
-                        entry.update(status="error", error_type=type(err).__name__)
-        except asyncio.TimeoutError:
-            for form, payload in requests:
-                entry = probes.setdefault(
-                    form,
-                    {"endpoint": "/admin/client", "form": form, "request": payload},
+                            or self._seq is None
+                        ):
+                            entry["reason"] = "existing_authentication_unavailable"
+                            continue
+                        entry["attempted"] = True
+                        response = await self._async_call_with_retry(
+                            self._async_probe_client_preferences,
+                            form,
+                            payload,
+                            timeout_error_retries=0,
+                        )
+                        entry["response"] = response
+                        code = response.get("error_code") or response.get("errorcode")
+                        entry["status"] = (
+                            "api_error"
+                            if code not in (None, 0, "", "0")
+                            else "response_received"
+                        )
+                        if entry["status"] == "api_error":
+                            entry["error_code"] = code
+            except (asyncio.TimeoutError, TimeoutException) as err:
+                entry.update(status="timeout", error_type=type(err).__name__)
+            except UnexpectedApiException as err:
+                entry.update(status="api_error", error_type=type(err).__name__)
+            except Exception as err:
+                # Do not serialize exception strings containing authenticated URLs.
+                entry.update(
+                    status="unexpected_exception", error_type=type(err).__name__
                 )
-                if "status" not in entry:
-                    entry["status"] = "probe_budget_exhausted"
-        return {"temporary": True, "budget_seconds": 15, "probes": probes}
+        return report
 
     async def _async_probe_client_preferences(self, form: str, payload: dict) -> dict:
         """Use only existing authentication, including on a helper retry."""

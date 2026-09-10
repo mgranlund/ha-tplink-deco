@@ -77,7 +77,9 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
         api._stok = None
         api._async_post = AsyncMock()
         result = await api.async_probe_client_preferences()
-        self.assertTrue(all(e["status"] == "error" for e in result["probes"].values()))
+        self.assertTrue(
+            all(e["status"] == "not_attempted" for e in result["probes"].values())
+        )
         api._async_post.assert_not_called()
         api.async_login.assert_not_called()
 
@@ -91,6 +93,7 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("secret URL", str(result))
         self.assertEqual(result["probes"]["client_list"]["error_type"], "ValueError")
         self.assertEqual(result["probes"]["client_access"]["response"], raw)
+        self.assertEqual(result["probes"]["client_access"]["status"], "api_error")
 
     async def test_forbidden_retry_cannot_login(self):
         api = self.make_api()
@@ -123,11 +126,107 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
             SCOPE["async_timeout"] = original
         self.assertFalse(api._operation_lock.locked())
         self.assertTrue(
+            all(e["status"] == "timeout" for e in result["probes"].values())
+        )
+
+
+DIAGNOSTIC_TREE = ast.parse(
+    (ROOT / "custom_components/tplink_deco/diagnostics.py").read_text()
+)
+DIAGNOSTIC_SCOPE = {
+    "__name__": "custom_components.tplink_deco.diagnostics",
+    "Any": object,
+    "HomeAssistant": object,
+    "ConfigEntry": object,
+    "asyncio": asyncio,
+    "async_timeout": SimpleNamespace(timeout=asyncio.timeout),
+    "async_redact_data": lambda value, keys: value,
+    "TO_REDACT": set(),
+    "DOMAIN": "tplink_deco",
+    "COORDINATOR_DECOS_KEY": "decos",
+    "COORDINATOR_CLIENTS_KEY": "clients",
+    "_coordinator_diagnostics": lambda c: {},
+}
+DIAGNOSTIC_TREE.body = [
+    n
+    for n in DIAGNOSTIC_TREE.body
+    if getattr(n, "name", "")
+    in {"_async_client_preference_diagnostics", "async_get_config_entry_diagnostics"}
+]
+exec(compile(DIAGNOSTIC_TREE, "diagnostics.py", "exec"), DIAGNOSTIC_SCOPE)
+
+
+class DiagnosticBoundaryTests(unittest.IsolatedAsyncioTestCase):
+    async def download(self, api):
+        deco = SimpleNamespace(
+            api=api, data=SimpleNamespace(decos={}, master_deco=None), paused=False
+        )
+        client = SimpleNamespace(data={}, client_query_mode="test")
+        hass = SimpleNamespace(
+            data={"tplink_deco": {"entry": {"decos": deco, "clients": client}}}
+        )
+        entry = SimpleNamespace(
+            entry_id="entry", version=1, minor_version=0, data={}, options={}
+        )
+        result = await DIAGNOSTIC_SCOPE["async_get_config_entry_diagnostics"](
+            hass, entry
+        )
+        self.assertIn("deco_coordinator", result)
+        probe = result["client_connection_preference_probe"]
+        self.assertEqual(probe["probe_version"], 2)
+        self.assertEqual(set(probe["probes"]), {"client_list", "client_access"})
+        return probe
+
+    async def test_missing_api_method_still_emits_marker(self):
+        result = await self.download(SimpleNamespace())
+        self.assertEqual(result["error_type"], "AttributeError")
+        self.assertEqual(result["probes"]["client_list"]["status"], "not_attempted")
+
+    async def test_partial_result_survives_exception(self):
+        async def fail(report):
+            report["probes"]["client_list"] = {"status": "api_error", "error_code": -1}
+            raise ValueError("secret URL")
+
+        result = await self.download(
+            SimpleNamespace(async_probe_client_preferences=fail)
+        )
+        self.assertEqual(result["status"], "unexpected_exception")
+        self.assertEqual(result["probes"]["client_list"]["error_code"], -1)
+        self.assertNotIn("secret URL", str(result))
+
+    async def test_boundary_timeout_still_emits_marker(self):
+        async def slow(report):
+            await asyncio.sleep(10)
+
+        original = DIAGNOSTIC_SCOPE["async_timeout"]
+        DIAGNOSTIC_SCOPE["async_timeout"] = SimpleNamespace(
+            timeout=lambda seconds: asyncio.timeout(0.01)
+        )
+        try:
+            result = await self.download(
+                SimpleNamespace(async_probe_client_preferences=slow)
+            )
+        finally:
+            DIAGNOSTIC_SCOPE["async_timeout"] = original
+        self.assertEqual(result["status"], "timeout")
+
+    async def test_both_api_calls_fail_still_returns_normal_diagnostics(self):
+        api = ProbeTests().make_api()
+        api._async_post = AsyncMock(side_effect=ValueError("secret URL"))
+        result = await self.download(api)
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(
             all(
-                e["status"] == "probe_budget_exhausted"
-                for e in result["probes"].values()
+                e["status"] == "unexpected_exception" for e in result["probes"].values()
             )
         )
+
+    async def test_external_cancellation_propagates(self):
+        async def cancel(report):
+            raise asyncio.CancelledError()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await self.download(SimpleNamespace(async_probe_client_preferences=cancel))
 
 
 if __name__ == "__main__":

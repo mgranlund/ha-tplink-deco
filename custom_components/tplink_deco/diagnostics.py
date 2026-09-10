@@ -1,8 +1,10 @@
 """Diagnostics support for TP-Link Deco."""
 
+import asyncio
 from datetime import datetime
 from typing import Any
 
+import async_timeout
 from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST
@@ -96,6 +98,47 @@ def _client_diagnostics(
     }
 
 
+async def _async_client_preference_diagnostics(coordinator) -> dict[str, Any]:
+    """Always build the marker here, independently of the installed API module."""
+    report = {
+        "probe_version": 2,
+        "diagnostics_module": __name__,
+        "temporary": True,
+        "budget_seconds": 15,
+        "status": "not_attempted",
+        "probes": {
+            form: {"status": "not_attempted", "attempted": False}
+            for form in ("client_list", "client_access")
+        },
+    }
+    try:
+        async with async_timeout.timeout(15):
+            await coordinator.api.async_probe_client_preferences(report)
+        report["status"] = "completed"
+        return async_redact_data(report, TO_REDACT)
+    except asyncio.TimeoutError as err:
+        report["status"] = "timeout"
+        report["error_type"] = type(err).__name__
+    except Exception as err:
+        report["status"] = "unexpected_exception"
+        report["error_type"] = type(err).__name__
+    # Keep partial results, but do not let a redaction failure hide the marker.
+    try:
+        return async_redact_data(report, TO_REDACT)
+    except Exception as err:
+        return {
+            "probe_version": 2,
+            "diagnostics_module": __name__,
+            "status": "unexpected_exception",
+            "error_type": type(err).__name__,
+            "stage": "redaction",
+            "probes": {
+                form: {"status": "not_attempted", "reason": "results_unavailable"}
+                for form in ("client_list", "client_access")
+            },
+        }
+
+
 async def async_get_config_entry_diagnostics(
     hass: HomeAssistant, config_entry: ConfigEntry
 ) -> dict[str, Any]:
@@ -118,8 +161,8 @@ async def async_get_config_entry_diagnostics(
             "options": async_redact_data(config_entry.options, TO_REDACT),
         },
         # Temporary discovery data retains client identifiers for correlation.
-        "client_connection_preference_probe": async_redact_data(
-            await deco_coordinator.api.async_probe_client_preferences(), TO_REDACT
+        "client_connection_preference_probe": await _async_client_preference_diagnostics(
+            deco_coordinator
         ),
         "deco_coordinator": {
             **_coordinator_diagnostics(deco_coordinator),
