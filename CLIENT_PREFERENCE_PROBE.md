@@ -1,103 +1,118 @@
-# Temporary client connection preference discovery
+# Temporary client preference probe, version 3
 
-This is a diagnostic experiment, not a confirmed connection preference API.
-It does not change the inventory service, entities, polling, node topology,
-manifest version or MQTT behavior. No new release is required.
+Diagnostic discovery only. No inventory schema, entities, MQTT, node topology,
+manifest version or releases are changed. The probe uses the existing HA API
+object, operation lock, encryption/decryption, transport and retry helper. It
+never calls login. Do not create another owner-authenticated session to test it.
 
-## Requests
+## Evidence and limits
 
-Both requests use the integration's existing authenticated `/admin/client`
-endpoint, encryption, transport, operation lock and retry helper:
+Live version-2 diagnostics returned successful `client_list` and `client_access`
+responses without an identifiable configured client preference. The repeated
+`client_access.device_id` must not be treated as the preferred Deco, and
+`client_mesh` does not identify a preferred node.
 
-| Form | Decrypted payload | Evidence |
+The next experiment tests MAC selectors on those established read forms.
+These selectors are hypotheses, not a verified per-client API schema.
+
+- Read-operation source: https://github.com/oliver006/deco/blob/main/admin_client.go
+- Feature description: https://www.tp-link.com/us/support/faq/3480/
+
+No substantiated dedicated preference/binding form was found in the sources
+checked. A successful response can mean the firmware ignored an unknown selector.
+Do not infer a preference from `device_id`, `client_mesh`, or current association.
+
+## Exact requests
+
+All requests go to `/admin/client` through the existing authenticated URL.
+For each selected client MAC `M`:
+
+| Result key suffix | Form | Decrypted payload |
 | --- | --- | --- |
-| `client_list` | `{"operation":"read","params":{"device_mac":"default"}}` | Already used by this integration; inspect the full envelope before model filtering. |
-| `client_access` | `{"operation":"read"}` | Read operation listed in https://github.com/oliver006/deco/blob/main/admin_client.go; preference semantics and required parameters are unknown. |
+| `client_list_mac` | `client_list` | `{"operation":"read","params":{"device_mac":"default","mac":"M"}}` |
+| `client_access_mac` | `client_access` | `{"operation":"read","params":{"mac":"M"}}` |
+| `client_access_client_mac` | `client_access` | `{"operation":"read","params":{"client_mac":"M"}}` |
 
-No guessed write operations, per-client sweep or new login is performed.
-The retry helper is reused with zero timeout retries. Its potential auth retry
-rechecks existing authentication and cannot call login. If the transport clears
-authentication, the probe skips further requests; normal integration polling
-remains responsible for its usual authentication recovery.
+`device_mac` selects a Deco in the established client-list call, so it remains
+`default`; it is not replaced with a client MAC. The `mac` hypothesis follows
+client record naming; `client_mac` tests an explicit client identifier.
 
-Version 2 adds a diagnostics-owned `probe_version: 2` marker and a boundary
-error handler. Each form has a seven-second limit, including lock acquisition,
-inside an overall 15-second diagnostics budget. Failed forms do not
-prevent the next form from being attempted within that budget. Outer transport
-errors are recorded as exception types only; decrypted API errors remain in the
-raw response. External task cancellation is propagated normally.
+MACs are normalized to uppercase hyphen notation. At most two selections and six
+requests are allowed. Invalid and duplicate selections are recorded and skipped.
+No selection means no requests. Each request has three seconds, including waiting
+for the lock, inside a 20-second overall diagnostics timeout. Timeout retries are
+disabled. The shared retry helper cannot initiate login through this probe.
 
-## Install and test in Home Assistant
+## Install and select a known client
 
-1. Back up `/homeassistant/custom_components/tplink_deco/api.py` and
-   `/homeassistant/custom_components/tplink_deco/diagnostics.py` outside the
-   integration folder. These instructions assume the installed `v3.10.1-home.2`.
-2. From the probe commit on GitHub, download those two files using **Raw** then
-   save the raw Python, not the GitHub HTML page. Replace the two files in the
-   folder above using your File Editor/Studio Code Server or existing file access.
-   Do not install an old tagged release through HACS: it will omit this probe.
-3. Restart Home Assistant through **Settings → System → Restart Home Assistant**
-   (restart Home Assistant itself, not only the integration).
-4. Wait for Deco entities to update successfully. Keep at least one client with
-   an already known Specified Connection online, plus an automatic client as a
-   comparison. Record their MACs and the expected preferred/current Decos from
-   your existing knowledge or HA entities. Do not open another owner login or
-   change a preference for this test.
-5. Go to **Settings → Devices & services → TP-Link Deco**. In the integration
-   entry's three-dot menu choose **Download diagnostics**. Allow up to 15 seconds
-   of additional time for the probe.
-6. In the JSON, find `data.client_connection_preference_probe` (or search for
-   `client_connection_preference_probe` if HA wraps the document differently).
-   Inspect `probes.client_list.response` and `probes.client_access.response`.
-   Each entry includes `request`, `form`, `endpoint`, and `status`.
+1. Back up the installed `api.py` and `diagnostics.py` outside the integration
+   folder. Start from the existing `v3.10.1-home.2` installation with its probe.
+2. Download **Raw** `custom_components/tplink_deco/api.py` and `diagnostics.py`
+   from this probe commit. Replace the corresponding files in
+   `/homeassistant/custom_components/tplink_deco/`. Do not save GitHub HTML.
+3. In the installed `diagnostics.py`, find:
 
-Expected keys are `probe_version` (2), `diagnostics_module`, `temporary`,
-`budget_seconds`, `status`, and `probes.client_list` / `probes.client_access`.
-The section is initialized by diagnostics itself even if the API method is missing.
-Boundary failures include `error_type`; partial per-form results are preserved.
-Exception types are serialized rather than exception strings that may contain
-credentials or authenticated URLs.
+   ```python
+   CLIENT_PREFERENCE_PROBE_MACS: tuple[str, ...] = ()
+   ```
 
-Per-form states:
+   Change it locally to the MAC of a client whose specified setting you know:
 
-- `not_attempted`: no call made (for example, authentication unavailable).
-- `response_received`: decrypted response without a nonzero API error code.
-- `api_error`: decrypted nonzero error (`error_code` and raw `response` retained),
-  or an API exception raised by the existing transport (`error_type`).
-- `timeout`: per-form timeout, including time waiting for the lock.
-- `unexpected_exception`: other exception, with `error_type`.
+   ```python
+   CLIENT_PREFERENCE_PROBE_MACS: tuple[str, ...] = (
+       "AA-BB-CC-DD-EE-FF",  # Replace this example with your actual client MAC.
+   )
+   ```
 
-`attempted` identifies whether the API read was invoked. Top-level `completed`
-means orchestration finished, even if both forms failed. Boundary `timeout` or
-`unexpected_exception` leaves unattempted entries present. External cancellation
-still cancels the download normally; unrelated failures in normal diagnostics
-can still fail the download.
+   Optionally add a second MAC for a known automatic client. Use the client MAC
+   in HA, not the Deco MAC. Keep private MACs out of commits to the public fork.
+4. Restart Home Assistant itself through **Settings → System → Restart Home
+   Assistant**. Wait for Deco entities to update successfully and keep the
+   selected clients online. No preference change or owner login is necessary.
+5. Open **Settings → Devices & services → TP-Link Deco → integration entry's
+   three-dot menu → Download diagnostics**. Allow up to 20 additional seconds.
 
-If the marker is absent from a successful fresh download, this patched hook did
-not supply that section (or the downloaded JSON was subsequently transformed).
-The original v1 hook also unconditionally included the key: an awaited exception
-would fail the download, not silently omit the key. Check the downloaded file's
-integration domain and the module loaded by the running HA instance. Confirming
-files on disk alone cannot prove which code handled a download.
+The manifest still reports `3.10.1-home.2`; the marker below identifies the probe.
 
-Missing preference fields or an unsupported form are inconclusive.
+## Inspect
 
-Raw client identifiers, names and IP addresses are intentionally retained for
-correlation. Credential keys use the existing diagnostics redaction set. Treat
-this experimental diagnostic download as private network data.
+Search for `client_connection_preference_probe`, normally under `data`.
+Expect `probe_version: 3`, `diagnostics_module`, `selected_client_macs`,
+`max_clients: 2`, `request_timeout_seconds: 3`, `budget_seconds: 20`,
+`selector_support: "unconfirmed"`, `status`, and `probes`.
 
-Do not assume `client_mesh` (roaming enablement), a current association field, or
-node `topology` is a configured client preference. The actual response must first
-be compared with known automatic and specified clients.
+For selection 1, the `probes` object contains these literal keys (the dot is part
+of each key, not an additional JSON nesting level):
 
-## Remove
+- `client_1.client_list_mac`
+- `client_1.client_access_mac`
+- `client_1.client_access_client_mac`
 
-Restore the backed-up two files and restart Home Assistant, or reinstall
-`v3.10.1-home.2`. The version remains `3.10.1-home.2` during this experiment;
-presence of the diagnostic probe key identifies the temporary build.
+Selection 2 uses the prefix `client_2`. Each valid selection's entries are
+initialized before network calls. Inspect `request`, `client_mac`, `response`,
+`attempted`, `status`, and any `error_code`, `error_type` or `reason`.
 
-## Checks
+States are `not_attempted`, `response_received`, `api_error`, `timeout`, and
+`unexpected_exception`. Top-level `completed` means orchestration finished, not
+that the preference was found. Empty selection produces `not_attempted` with
+`reason: "configure_CLIENT_PREFERENCE_PROBE_MACS_in_diagnostics_py"` and empty
+`probes`. A missing/mismatched API method produces a boundary error while keeping
+the version marker. External cancellation still cancels a download normally.
 
-`python -m unittest discover -s tests` exercises actual probe/retry methods with
-mocked transport and crypto without requiring HA. These are isolated checks,
-not a live firmware or full Home Assistant integration test.
+Compare returned client MACs and envelopes across the three requests and against
+version 2. Responses containing unrelated clients may indicate ignored filters.
+Even a single-client response needs comparison with the known app setting before
+any field can be called a configured preference.
+
+Raw client identifiers are retained for correlation; existing credential-key
+redaction is applied. Exception types, not potentially credential-bearing
+exception strings, are serialized. Keep downloaded diagnostics private.
+
+## Remove and checks
+
+Restore the backed-up files and restart HA, or reinstall `v3.10.1-home.2`.
+To change test clients, edit the local tuple and restart HA again.
+
+Run `python -m unittest discover -s tests`. The focused checks compile actual
+probe/retry and diagnostics hook functions with mocked transport/HA context;
+they do not contact a Deco or constitute a full HA/firmware test.

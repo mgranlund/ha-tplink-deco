@@ -98,27 +98,40 @@ def _client_diagnostics(
     }
 
 
+# Temporary, local-only selection: add one known specified client and optionally
+# one automatic client here. Use MACs from HA. Do not commit private MACs upstream.
+CLIENT_PREFERENCE_PROBE_MACS: tuple[str, ...] = ()
+
+
 async def _async_client_preference_diagnostics(coordinator) -> dict[str, Any]:
     """Always build the marker here, independently of the installed API module."""
     report = {
-        "probe_version": 2,
+        "probe_version": 3,
         "diagnostics_module": __name__,
         "temporary": True,
-        "budget_seconds": 15,
+        "budget_seconds": 20,
         "status": "not_attempted",
-        "probes": {
-            form: {"status": "not_attempted", "attempted": False}
-            for form in ("client_list", "client_access")
-        },
+        "selected_client_macs": list(CLIENT_PREFERENCE_PROBE_MACS[:2]),
+        "max_clients": 2,
+        "request_timeout_seconds": 3,
+        "selector_support": "unconfirmed",
+        "probes": {},
     }
     try:
-        async with async_timeout.timeout(15):
-            await coordinator.api.async_probe_client_preferences(report)
-        report["status"] = "completed"
+        async with async_timeout.timeout(20):
+            await coordinator.api.async_probe_client_preferences(
+                report, CLIENT_PREFERENCE_PROBE_MACS
+            )
+        report["status"] = "completed" if report["probes"] else "not_attempted"
         return async_redact_data(report, TO_REDACT)
     except asyncio.TimeoutError as err:
         report["status"] = "timeout"
         report["error_type"] = type(err).__name__
+        for entry in report["probes"].values():
+            if entry.get("status") == "not_attempted":
+                entry["reason"] = "overall_budget_exhausted"
+                if entry.get("attempted"):
+                    entry["status"] = "timeout"
     except Exception as err:
         report["status"] = "unexpected_exception"
         report["error_type"] = type(err).__name__
@@ -127,15 +140,13 @@ async def _async_client_preference_diagnostics(coordinator) -> dict[str, Any]:
         return async_redact_data(report, TO_REDACT)
     except Exception as err:
         return {
-            "probe_version": 2,
+            "probe_version": 3,
             "diagnostics_module": __name__,
             "status": "unexpected_exception",
             "error_type": type(err).__name__,
             "stage": "redaction",
-            "probes": {
-                form: {"status": "not_attempted", "reason": "results_unavailable"}
-                for form in ("client_list", "client_access")
-            },
+            "probes": {},
+            "reason": "results_unavailable",
         }
 
 

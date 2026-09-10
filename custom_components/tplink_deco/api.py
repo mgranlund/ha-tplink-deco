@@ -314,31 +314,67 @@ class TplinkDecoApi:
         check_data_error_code(context, data)
         return data
 
-    async def async_probe_client_preferences(self, report: dict | None = None) -> dict:
-        """Temporary diagnostics-only reads; never initiate authentication.
-
-        Mutate a caller-owned report so partial results survive a boundary error.
-        """
+    async def async_probe_client_preferences(
+        self, report: dict | None = None, client_macs: tuple[str, ...] = ()
+    ) -> dict:
+        """Temporary MAC-scoped diagnostics reads; never initiate authentication."""
         if report is None:
-            report = {"probe_version": 2, "probes": {}}
-        requests = (
-            ("client_list", {"operation": "read", "params": {"device_mac": "default"}}),
-            ("client_access", {"operation": "read"}),
-        )
+            report = {"probe_version": 3, "probes": {}}
         probes = report["probes"]
-        for form, payload in requests:
-            probes[form] = {
-                "endpoint": "/admin/client",
-                "form": form,
-                "request": payload,
-                "status": "not_attempted",
-                "attempted": False,
-            }
-        for form, payload in requests:
-            entry = probes[form]
+        requests = []
+        seen = set()
+        # A hard cap and strict validation prevent accidental network-wide sweeps.
+        for index, value in enumerate(client_macs[:2]):
+            selection = f"client_{index + 1}"
+            mac = value.upper().replace(":", "-") if isinstance(value, str) else ""
+            if not re.fullmatch(r"(?:[0-9A-F]{2}-){5}[0-9A-F]{2}", mac):
+                probes[selection] = {
+                    "status": "not_attempted",
+                    "attempted": False,
+                    "reason": "invalid_client_mac",
+                }
+                continue
+            if mac in seen:
+                probes[selection] = {
+                    "status": "not_attempted",
+                    "attempted": False,
+                    "reason": "duplicate_client_mac",
+                }
+                continue
+            seen.add(mac)
+            candidates = (
+                (
+                    "client_list_mac",
+                    "client_list",
+                    {"device_mac": "default", "mac": mac},
+                ),
+                ("client_access_mac", "client_access", {"mac": mac}),
+                ("client_access_client_mac", "client_access", {"client_mac": mac}),
+            )
+            for candidate, form, params in candidates:
+                key = f"{selection}.{candidate}"
+                payload = {"operation": "read", "params": params}
+                probes[key] = {
+                    "endpoint": "/admin/client",
+                    "form": form,
+                    "request": payload,
+                    "client_mac": mac,
+                    "status": "not_attempted",
+                    "attempted": False,
+                    "selector_support": "unconfirmed",
+                }
+                requests.append((key, form, payload))
+        if not client_macs:
+            report["reason"] = (
+                "configure_CLIENT_PREFERENCE_PROBE_MACS_in_diagnostics_py"
+            )
+        if len(client_macs) > 2:
+            report["selection_truncated"] = True
+        for key, form, payload in requests:
+            entry = probes[key]
             try:
-                # Seven seconds per form includes waiting for the shared lock.
-                async with async_timeout.timeout(7):
+                # Three seconds per request includes waiting for the shared lock.
+                async with async_timeout.timeout(3):
                     async with self._operation_lock:
                         if (
                             not all(
