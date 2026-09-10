@@ -294,6 +294,26 @@ class TplinkDecoApi:
             _LOGGER.error("%s parse response error=%s", context, err)
             raise err
 
+    async def async_list_address_reservations(self) -> dict:
+        """Return authoritative DHCP reservations using the existing session."""
+        async with self._operation_lock:
+            return await self._async_call_with_retry(
+                self._async_list_address_reservations
+            )
+
+    async def _async_list_address_reservations(self) -> dict:
+        await self.async_login_if_needed()
+        context = "List Address Reservations"
+        response_json = await self._async_post(
+            context,
+            f"{self._host}/cgi-bin/luci/;stok={self._stok}/admin/client",
+            params={"form": "addr_reservation"},
+            data=self._encode_payload({"operation": "getlist"}),
+        )
+        data = self._decrypt_data(context, response_json["data"])
+        check_data_error_code(context, data)
+        return data
+
     def _generate_aes_key_and_iv(self):
         # TPLink requires key and IV to be a 16 digit number (no leading 0s)
         self._aes_key = secrets.randbelow(MAX_AES_KEY - MIN_AES_KEY) + MIN_AES_KEY

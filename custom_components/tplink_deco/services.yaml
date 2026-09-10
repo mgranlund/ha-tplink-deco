@@ -11,3 +11,14 @@ reboot_deco:
           integration: tplink_deco
           manufacturer: TP-Link Deco
           multiple: true
+
+get_network_inventory:
+  name: Get network inventory
+  description: Read current Deco nodes, configured topology, and DHCP reservations.
+  fields:
+    config_entry_id:
+      name: Config entry
+      description: Required when more than one Deco network is loaded.
+      selector:
+        config_entry:
+          integration: tplink_deco

@@ -405,3 +405,35 @@ Code template was mainly taken from [@Ludeeus](https://github.com/ludeeus)'s [in
 [releases-shield]: https://img.shields.io/github/release/amosyuen/ha-tplink-deco.svg?style=for-the-badge
 [releases]: https://github.com/amosyuen/ha-tplink-deco/releases
 [user_profile]: https://github.com/amosyuen
+
+## Network inventory (home-inventory fork)
+
+`tplink_deco.get_network_inventory` reads fresh Deco nodes and authoritative DHCP
+reservations through the integration's existing authenticated session. It also
+works while polling is paused. Capture the required response in an automation:
+
+```yaml
+- action: tplink_deco.get_network_inventory
+  data: {} # Set config_entry_id here if multiple Deco networks are loaded.
+  response_variable: deco_inventory
+```
+
+The response contains `decos` and `reservations` lists. Each reservation has `mac`
+and `ip`. Each Deco includes `name`, `mac`, `ip`, `online`, `internet_online`,
+`master`, `connection_type`, `backhaul_speed`, `backhaul_max_speed`, `device_id`,
+`parent_device_id`, `previous`, `topology`, `topology_auto`,
+`specified_parent_device_id`, and `specified_parent` (an object with `name` and
+`mac`, or null). Speed values retain the router's API representation.
+
+A configured parent is resolved only when `topology.auto` is false. Automatic
+selection returns null for the specified parent; absent topology is unknown
+(null), not assumed automatic. An unresolved configured ID is retained even when
+its parent cannot be named. Offline nodes may omit topology and backhaul fields.
+Current parent fields are kept separate from the configured preference; they do
+not prove physical cabling or powerline paths.
+
+The two API reads are sequential, not an atomic snapshot. Failed/unsupported
+reservation reads fail the action rather than claiming there are no reservations.
+Clients are intentionally omitted. MQTT publishing stays in your automation.
+Inventory contains network identifiers; diagnostics retain their existing
+privacy-preserving field allowlist and do not fetch or include this inventory.

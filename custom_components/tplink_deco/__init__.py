@@ -58,8 +58,15 @@ from .coordinator import TpLinkDecoClient
 from .coordinator import TpLinkDecoData
 from .coordinator import TplinkDecoClientUpdateCoordinator
 from .coordinator import TplinkDecoUpdateCoordinator
+from .inventory import async_setup_inventory_service
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
+
+
+async def async_setup(hass: HomeAssistant, config: dict) -> bool:
+    """Register the inventory action independently of loaded entries."""
+    async_setup_inventory_service(hass)
+    return True
 
 
 async def async_create_and_refresh_coordinators(

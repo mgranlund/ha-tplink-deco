@@ -104,6 +104,10 @@ class TpLinkDeco:
         self.signal_band5 = None
         self.backhaul_speed = None
         self.backhaul_max_speed = None
+        self.device_id = None
+        self.parent_device_id = None
+        self.previous = None
+        self.topology = {}
         self.cpu_usage = None
         self.cpu_usage_raw = None
         self.mem_usage = None
@@ -140,6 +144,15 @@ class TpLinkDeco:
         self.signal_band5 = signal_level.get("band5")
         self.backhaul_speed = data.get("backhual_speed")
         self.backhaul_max_speed = data.get("backhual_max_speed")
+        # Missing fields (for example on offline nodes) must not retain stale topology.
+        self.device_id = data.get("device_id")
+        self.parent_device_id = data.get("parent_device_id")
+        self.previous = data.get("previous")
+        topology = data.get("topology") or {}
+        self.topology = {
+            "auto": topology.get("auto"),
+            "device_id": topology.get("device_id"),
+        }
 
 
 class TpLinkDecoClient:
