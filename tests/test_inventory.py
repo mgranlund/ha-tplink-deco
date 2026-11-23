@@ -197,3 +197,124 @@ async def test_reservation_read_uses_shared_lock_and_auth_recovery(failure):
     }
     assert api.async_login_if_needed.await_count == 2
     assert not api._operation_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_inventory_domain_registration_survives_entry_reload(
+    tmp_path, monkeypatch
+):
+    """Keep one domain action through entry setup, unload and setup again."""
+    from homeassistant.core import HomeAssistant
+
+    from custom_components import tplink_deco as integration
+    from custom_components.tplink_deco.const import COORDINATOR_CLIENTS_KEY
+    from custom_components.tplink_deco.const import COORDINATOR_MOBILE_KEY
+    from custom_components.tplink_deco.const import COORDINATOR_WIRELESS_KEY
+
+    hass = HomeAssistant(str(tmp_path))
+    hass.config_entries = MagicMock()
+    hass.config_entries.async_forward_entry_setups = AsyncMock()
+    hass.config_entries.async_forward_entry_unload = AsyncMock(return_value=True)
+    entry = MagicMock(entry_id="network")
+    # Entry refreshes are outside this lifecycle test; do not leave coroutines open.
+    entry.async_create_background_task.side_effect = (
+        lambda _hass, coro, **kw: coro.close()
+    )
+    apis = []
+
+    async def create_data(_hass, _entry):
+        api = SimpleNamespace(
+            async_list_devices=AsyncMock(return_value=nodes()),
+            async_list_address_reservations=AsyncMock(return_value=reservations()),
+            async_logout=AsyncMock(),
+        )
+        apis.append(api)
+        return {
+            key: SimpleNamespace(
+                api=api,
+                paused=True,
+                async_refresh=AsyncMock(),
+                async_shutdown=AsyncMock(),
+                async_close=AsyncMock(),
+            )
+            for key in (
+                COORDINATOR_DECOS_KEY,
+                COORDINATOR_CLIENTS_KEY,
+                COORDINATOR_MOBILE_KEY,
+                COORDINATOR_WIRELESS_KEY,
+            )
+        }
+
+    monkeypatch.setattr(integration, "async_create_config_data", create_data)
+    monkeypatch.setattr(
+        integration, "async_setup_syslog_forwarder", AsyncMock(return_value=None)
+    )
+    register = MagicMock(wraps=hass.services.async_register)
+    monkeypatch.setattr(
+        type(hass.services),
+        "async_register",
+        lambda registry, *args, **kwargs: register(*args, **kwargs),
+    )
+
+    async def inventory():
+        return await hass.services.async_call(
+            DOMAIN,
+            SERVICE_GET_NETWORK_INVENTORY,
+            {},
+            blocking=True,
+            return_response=True,
+        )
+
+    assert await async_setup(hass, {})
+    assert hass.services.has_service(DOMAIN, SERVICE_GET_NETWORK_INVENTORY)
+    assert hass.services.has_service(DOMAIN, SERVICE_DOWNLOAD_SYSTEM_LOG)
+    # An unloaded entry is a validation error, not an unknown action.
+    with pytest.raises(ServiceValidationError):
+        await inventory()
+    handler = hass.services.async_services()[DOMAIN][SERVICE_GET_NETWORK_INVENTORY]
+    assert await integration.async_setup_entry(hass, entry)
+    expected = network_inventory(nodes(), reservations())
+    assert await inventory() == expected
+    assert await integration.async_unload_entry(hass, entry)
+    assert hass.services.has_service(DOMAIN, SERVICE_GET_NETWORK_INVENTORY)
+    assert hass.services.has_service(DOMAIN, SERVICE_DOWNLOAD_SYSTEM_LOG)
+    with pytest.raises(ServiceValidationError):
+        await inventory()
+    assert await integration.async_setup_entry(hass, entry)
+    assert await inventory() == expected
+    assert apis[0].async_list_devices.await_count == 1
+    assert apis[1].async_list_devices.await_count == 1
+    assert (
+        hass.services.async_services()[DOMAIN][SERVICE_GET_NETWORK_INVENTORY] is handler
+    )
+    for service in (SERVICE_GET_NETWORK_INVENTORY, SERVICE_DOWNLOAD_SYSTEM_LOG):
+        assert (
+            sum(call.args[:2] == (DOMAIN, service) for call in register.call_args_list)
+            == 1
+        )
+    assert await integration.async_unload_entry(hass, entry)
+    await hass.async_block_till_done()
+
+
+@pytest.mark.asyncio
+async def test_inventory_action_validation_does_not_require_registration(tmp_path):
+    """HA can validate this ordinary service action before domain setup."""
+    from homeassistant.core import HomeAssistant
+    from homeassistant.helpers import config_validation as cv
+    from homeassistant.helpers import script
+
+    hass = HomeAssistant(str(tmp_path))
+    actions = cv.SCRIPT_SCHEMA(
+        [
+            {
+                "action": "tplink_deco.get_network_inventory",
+                "data": {},
+                "response_variable": "inventory",
+            }
+        ]
+    )
+    assert not hass.services.has_service(DOMAIN, SERVICE_GET_NETWORK_INVENTORY)
+    assert await script.async_validate_actions_config(hass, actions) == actions
+    assert await async_setup(hass, {})
+    assert await script.async_validate_actions_config(hass, actions) == actions
+    await hass.async_block_till_done()

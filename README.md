@@ -637,3 +637,19 @@ API used by this integration. The Android app reads this state through a separat
 TMP transport with its own authenticated session, which this integration does not
 implement. This limitation does not affect the node-level specified parent
 resolution described above.
+
+### Existing unknown-action repairs
+
+The inventory action is registered at integration-domain setup, alongside
+`download_system_log`, before any Deco config entry is loaded. It remains
+registered during config-entry reloads; calling it with no loaded Deco entry
+returns a validation error rather than an unknown-action error.
+
+Home Assistant retains unknown-action repairs created by earlier failed automation
+runs. After installing the fork and fully restarting Home Assistant, confirm that
+`tplink_deco.get_network_inventory` appears in Developer Tools → Actions, then run
+the inventory automation and check its trace and response. If the run succeeds,
+open the old repair and submit confirmation that it is fixed; do not remove the
+inventory action from the automation. If the action is still missing, verify the
+installed fork files and startup logs before dismissing the repair. Merely
+reloading the Deco config entry does not rerun integration-domain setup.
