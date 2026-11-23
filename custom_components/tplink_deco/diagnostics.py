@@ -10,17 +10,22 @@ from homeassistant.const import CONF_PASSWORD
 from homeassistant.const import CONF_USERNAME
 from homeassistant.core import HomeAssistant
 
+from .const import CONF_SYSLOG_HOST
 from .const import COORDINATOR_CLIENTS_KEY
 from .const import COORDINATOR_DECOS_KEY
+from .const import COORDINATOR_MOBILE_KEY
+from .const import COORDINATOR_WIRELESS_KEY
 from .const import DOMAIN
 from .coordinator import TpLinkDeco
 from .coordinator import TpLinkDecoClient
 from .coordinator import TplinkDecoClientUpdateCoordinator
 from .coordinator import TplinkDecoUpdateCoordinator
+from .wireless import TplinkDecoWirelessUpdateCoordinator
 
 TO_REDACT = {
     CONF_HOST,
     CONF_PASSWORD,
+    CONF_SYSLOG_HOST,
     CONF_USERNAME,
     "access_token",
     "cookie",
@@ -105,6 +110,10 @@ async def async_get_config_entry_diagnostics(
     client_coordinator: TplinkDecoClientUpdateCoordinator = data[
         COORDINATOR_CLIENTS_KEY
     ]
+    mobile_coordinator = data.get(COORDINATOR_MOBILE_KEY)
+    wireless_coordinator: TplinkDecoWirelessUpdateCoordinator = data[
+        COORDINATOR_WIRELESS_KEY
+    ]
 
     decos = sorted(deco_coordinator.data.decos.items())
     clients = sorted(client_coordinator.data.items())
@@ -120,6 +129,9 @@ async def async_get_config_entry_diagnostics(
         "deco_coordinator": {
             **_coordinator_diagnostics(deco_coordinator),
             "paused": deco_coordinator.paused,
+            "device_list_interval_seconds": (
+                deco_coordinator.device_list_interval_seconds
+            ),
             "master_deco_id": (
                 deco_ids.get(deco_coordinator.data.master_deco.mac)
                 if deco_coordinator.data.master_deco is not None
@@ -130,9 +142,33 @@ async def async_get_config_entry_diagnostics(
         "client_coordinator": {
             **_coordinator_diagnostics(client_coordinator),
             "query_mode": client_coordinator.client_query_mode,
+            "backoff_remaining_seconds": client_coordinator.remaining_backoff_seconds,
             "clients": [
                 _client_diagnostics(client, f"client_{index}", deco_ids)
                 for index, (_, client) in enumerate(clients, 1)
             ],
         },
+        "wireless_coordinator": {
+            "last_update_success": wireless_coordinator.last_update_success,
+            "update_interval_seconds": (
+                wireless_coordinator.update_interval.total_seconds()
+                if wireless_coordinator.update_interval is not None
+                else None
+            ),
+            "retry_remaining_seconds": (wireless_coordinator.retry_remaining_seconds),
+            "available_networks": sorted(wireless_coordinator.data),
+        },
+        "mobile_data_coordinator": (
+            {
+                "last_update_success": mobile_coordinator.last_update_success,
+                "supported": mobile_coordinator.data is not None,
+                "update_interval_seconds": (
+                    mobile_coordinator.update_interval.total_seconds()
+                    if mobile_coordinator.update_interval is not None
+                    else None
+                ),
+            }
+            if mobile_coordinator is not None
+            else None
+        ),
     }

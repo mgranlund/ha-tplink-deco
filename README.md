@@ -1,7 +1,10 @@
 # TP-Link Deco
 
+> **Maintainer update:** v3.15.3 is my final release for this repository. I'd be glad to see others continue maintaining it here. I'll take development in my own direction at [dkwolf1/ha-deco](https://github.com/dkwolf1/ha-deco), where I'll publish my future releases and provide support. Existing installations do not need to switch to use v3.15.3. To follow my future releases, see the [migration guide](https://github.com/dkwolf1/ha-deco/wiki/Installation#switching-from-the-original-repository). - Dennis (@dkwolf1)
+
 [![GitHub Release](https://img.shields.io/github/v/release/amosyuen/ha-tplink-deco?style=for-the-badge)](https://github.com/amosyuen/ha-tplink-deco/releases)
 [![GitHub Activity](https://img.shields.io/github/commit-activity/y/amosyuen/ha-tplink-deco?style=for-the-badge)](https://github.com/amosyuen/ha-tplink-deco/commits/main)
+[![Wiki](https://img.shields.io/badge/docs-wiki-blue?style=for-the-badge)](https://github.com/amosyuen/ha-tplink-deco/wiki)
 [![License](https://img.shields.io/github/license/amosyuen/ha-tplink-deco?style=for-the-badge)](LICENSE)
 
 [![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?style=for-the-badge)](https://github.com/pre-commit/pre-commit)
@@ -9,13 +12,17 @@
 [![HACS](https://img.shields.io/badge/HACS-Custom-orange.svg?style=for-the-badge)](https://hacs.xyz)
 
 [![Maintained](https://img.shields.io/badge/maintained-yes-brightgreen?style=for-the-badge)]()
-[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.4%2B-blue?style=for-the-badge)](https://www.home-assistant.io/)
+[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2025.12%2B-blue?style=for-the-badge)](https://www.home-assistant.io/)
 
 ---
 
 ## 🚀 Overview
 
 This integration provides local polling control and diagnostics for TP-Link Deco systems within Home Assistant.
+
+For installation, configuration, troubleshooting, diagnostics, and firmware notes, see the [TP-Link Deco Wiki](https://github.com/amosyuen/ha-tplink-deco/wiki).
+
+See the [syslog setup and troubleshooting guide](https://github.com/amosyuen/ha-tplink-deco/wiki/Syslog) for the optional forwarding feature introduced in v3.15.0. Existing installations do not need to enable forwarding or recreate the integration after upgrading.
 
 ---
 
@@ -26,8 +33,18 @@ This integration provides local polling control and diagnostics for TP-Link Deco
 - CPU usage (raw + smoothed)
 - Memory usage (raw + smoothed)
 - Backhaul and network diagnostics
+- Monthly mobile data usage on supported 5G Deco firmware
 - Coordinator health (last successful update, response time, timeouts, query mode,
   and last error)
+
+### Session recovery
+
+- Keeps the current Deco session during temporary connection drops to avoid
+  unnecessary logins and session exhaustion.
+- Automatically establishes a new session when the Deco rejects a stale session
+  with HTTP 401/403.
+- Recovers encrypted legacy sessions when a rebooted Deco returns an empty or
+  invalid encrypted response.
 
 ### CPU / Memory sensors
 
@@ -61,6 +78,12 @@ Two types of sensors are available:
 - Switch entity:
   - `switch.deco_polling`
 
+Each config entry has its own polling switch. Since v3.15.0, the switch's
+unique ID is scoped to that entry; the existing entity ID is preserved during
+migration. Entity IDs can differ between installations. With multiple entries,
+use each entry's switch rather than relying on the pause/resume actions to
+select a particular mesh.
+
 ---
 
 #### Polling interval control
@@ -77,6 +100,21 @@ Configurable:
 - during setup
 - via Home Assistant UI (select entity)
 
+#### Deco status polling
+
+`device_list` polling can be configured independently from client and
+performance polling in the integration options. Enter an interval of at least
+10 seconds, or use `0` to run `device_list` only during integration startup.
+
+When automatic Deco status polling is disabled, client tracking and performance
+updates continue normally. Deco online state, topology changes, and newly added
+Deco nodes are refreshed only after reloading the integration or pressing the
+`Refresh Deco status` button.
+
+Some Deco firmware, including reported X20 firmware, may briefly interrupt
+wireless-backhaul traffic while processing `device_list`. A longer interval or
+startup-only mode can mitigate this firmware behavior.
+
 ---
 
 #### Benefits
@@ -88,11 +126,89 @@ Configurable:
 
 ---
 
+### WiFi network status
+
+Read-only binary sensors show whether the main, guest and IoT WiFi networks are
+enabled. Only networks exposed by the Deco firmware are created. The main WiFi
+sensor is disabled by default because most models do not allow that network to
+be switched off.
+
+Network names (SSIDs) are not exposed by default. Enable **Show WiFi network
+names on the WiFi status sensors** in the integration options to add them as
+attributes. A sensor shows a single `ssid` attribute when all bands use the same
+name, or one attribute per band (for example `ssid_band2_4` and `ssid_band5_1`)
+when the names differ. The attribute is omitted when no name is reported.
+Passwords are never read.
+
+Wireless status uses the configured integration polling interval and does not
+delay integration setup when the optional endpoint is slow or unavailable.
+Changing WiFi settings is not supported because the local write API is not
+reliable across Deco models and firmware versions.
+
+### Syslog forwarding
+
+Forwarding sends new Deco system log lines to a syslog server as RFC 5424
+messages. It's off by default. To turn it on, enable **Forward the Deco system
+log to a syslog server** in the integration options and enter the server's
+host. Each config entry forwards its own Deco's log.
+
+The port defaults to 514. UDP sends one datagram per line, and TCP ends each
+line with a newline (RFC 6587).
+
+Each run downloads the whole log at the chosen level. A download can take
+several seconds, and other polling waits until it finishes. The interval
+defaults to 300 seconds, with a minimum of 60.
+
+Which lines are sent:
+
+- Lines already in the log when forwarding is enabled or the level changes
+  are not sent.
+- After a restart, forwarding resumes from the saved position if it can be
+  matched in the Deco's retained log, subject to the per-poll limit.
+- A reported send failure keeps the saved position for a later retry. UDP
+  does not acknowledge delivery, so a successful send is not proof of receipt.
+- The Deco sometimes returns an empty or stale log, so a run that gets an
+  empty log or can't find the last lines seen sends nothing.
+- If two non-empty downloads in succession cannot find the saved position,
+  for example after the Deco reboots, the downloaded log is treated as new,
+  subject to the same time budget and checkpointed batch handling.
+- Since v3.15.3, new lines are sent oldest first in batches of up to 1000,
+  without discarding the beginning of a burst. Each completed batch saves
+  progress. A failed, interrupted or paused run can resume from that position
+  on a later poll, provided the remaining lines are still in the Deco log.
+- A line without a Deco timestamp, such as the rest of a command's output, is
+  sent with the timestamp and priority of the last timestamped line before it.
+
+The log can contain client names, MAC/IP addresses and authentication-related
+protocol data. It is not automatically redacted. Syslog sends it unencrypted,
+so use a server on a trusted local network and review logs before sharing.
+TCP retries after a partial send can duplicate lines.
+
+Versions v3.15.0 through v3.15.2 discarded older excess lines at the 1000-line
+poll cap. Update to v3.15.3 or newer to preserve the start of fetched bursts.
+Sending/checkpointing has a 30-second budget per run, with the existing
+per-batch network timeouts and UDP pacing retained. Unsent lines are retried
+from the saved position; there is no separate durable queue of their content.
+Router log rotation, failed delivery and partial-send retries can still cause
+loss or duplication. This is not a guaranteed lossless archive. Avoid
+shortening the polling interval on a slow mesh merely to reduce burst size.
+
+See [Syslog in the wiki](https://github.com/amosyuen/ha-tplink-deco/wiki/Syslog)
+for receiver configuration, UDP/TCP tests and cleanup instructions.
+
+Forwarding isn't available on firmware that uses the legacy encrypted web
+session, such as the Deco S7 firmware listed under
+[Tested Devices](#tested-devices). On that firmware, the integration logs one
+warning and stops forwarding until it's reloaded.
+
+---
+
 ## 🔧 Services
 
 - `tplink_deco.pause_polling`
 - `tplink_deco.resume_polling`
 - `tplink_deco.reboot_deco`
+- `tplink_deco.download_system_log`
 
 ---
 
@@ -102,48 +218,31 @@ Configurable:
 
 - `switch.deco_polling`
 - `select.polling_interval`
+- `button.refresh_deco_status`
 
 ### Diagnostics
 
 - CPU usage (raw + smoothed)
 - Memory usage (raw + smoothed)
+- Mobile data usage (only created when exposed by the firmware)
 
----
+### WiFi status
 
-## 📦 Installation
+- Main WiFi (disabled by default)
+- Guest WiFi
+- IoT WiFi
 
-### HACS
+## Device Tracking and Topology
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=amosyuen&repository=ha-tplink-deco&category=integration)
-
-### Manual
-
-1. Copy `custom_components/tplink_deco` to your Home Assistant config folder
-2. Restart Home Assistant
-3. Add the integration via UI
-
-# TP-Link Deco
-
-[![GitHub Release][releases-shield]][releases]
-[![GitHub Activity][commits-shield]][commits]
-[![License][license-shield]](LICENSE)
-
-[![pre-commit][pre-commit-shield]][pre-commit]
-[![Black][black-shield]][black]
-
-[![hacs][hacsbadge]][hacs]
-[![Project Maintenance][maintenance-shield]][user_profile]
-[![BuyMeCoffee][buymecoffeebadge]][buymecoffee]
-
-[![Community Forum][forum-shield]][forum]
-
-## Functionality
-
-This integration is a local polling integration that logs into the admin web UI for TP-Link Deco routers. Currently the only feature implemented is device trackers for active devices.
+The integration uses the local Deco web API for node and client tracking,
+throughput, diagnostics, runtime polling controls and optional firmware-specific
+endpoints. Some features are unavailable on particular models or firmware.
 
 ### Device Trackers
 
 Device trackers are added for both decos and clients. The device tracker state marks whether the device is connected to the deco. If a device is not present, the previous values for attributes are saved except for `down_kilobytes_per_s` and `up_kilobytes_per_s`.
+
+By default, Home Assistant may link a client tracker to a device from another integration when both report the same MAC address. Disable **Link client trackers to devices by MAC address** in the integration options to prevent this. The tracker keeps its entity ID and exposes the MAC as a state attribute, but no longer participates in MAC-based device matching or DHCP discovery. Existing client devices can then be removed manually; Deco devices remain protected.
 
 #### Common Attributes
 
@@ -166,19 +265,21 @@ Device trackers are added for both decos and clients. The device tracker state m
 
 #### Deco Attributes
 
-| Attribute       | Example Values (comma separated) |
-| --------------- | -------------------------------- |
-| hw_version      | 2.0                              |
-| sw_version      | 1.5.1 Build 20210204 Rel. 50164  |
-| device_model    | x60                              |
-| internet_online | false, true                      |
-| master          | false, true                      |
-| bssid_band2_4   | A1:B2:C3:D4:E5:F6                |
-| bssid_band5     | A1:B2:C3:D4:E5:F6                |
-| signal_band2_4  | 3                                |
-| signal_band2_4  | 4                                |
-| deco_device     | living_room                      |
-| deco_mac        | 1A-B2-C3-4D-56-EF                |
+| Attribute              | Example Values (comma separated) |
+| ---------------------- | -------------------------------- |
+| hw_version             | 2.0                              |
+| sw_version             | 1.5.1 Build 20210204 Rel. 50164  |
+| device_model           | x60                              |
+| internet_online        | false, true                      |
+| master                 | false, true                      |
+| bssid_band2_4          | A1:B2:C3:D4:E5:F6                |
+| bssid_band5            | A1:B2:C3:D4:E5:F6                |
+| backhaul_bssid_band2_4 | A1:B2:C3:D4:E5:F6                |
+| backhaul_bssid_band5   | A1:B2:C3:D4:E5:F6                |
+| signal_band2_4         | 3                                |
+| signal_band5           | 4                                |
+| deco_device            | living_room                      |
+| deco_mac               | 1A-B2-C3-4D-56-EF                |
 
 Note: `deco_device` and `deco_mac` will only be set for non-master decos.
 
@@ -186,25 +287,73 @@ Note: `deco_device` and `deco_mac` will only be set for non-master decos.
 
 A device is created for each deco. Each device contains the device_tracker entities for itself and any clients connected to it. Non-master deco devices will indicate that they are connected via the master deco device.
 
-### Services
+## Action Examples
 
-#### Reboot Deco Service
+### Reboot Deco
 
 Reboots the specified decos. Example yaml:
 
 ```yaml
-service: tplink_deco.reboot_deco
-target:
+action: tplink_deco.reboot_deco
+data:
   device_id:
     - ef41562be18e5e3057e232ffb26de9bb
     - d7f96b1f312d83f195b35ecdfbb3b02b
 ```
 
+### Download System Log
+
+Saves the Deco system log to `<config>/tplink_deco_logs/<filename>` and returns
+the file path and line count. The file is the one the web UI's Save Log button
+produces under Advanced > System > System Log.
+
+```yaml
+action: tplink_deco.download_system_log
+data:
+  config_entry_id: 01JABCDEF0123456789ABCDEFG # required with more than one Deco entry
+  filename: deco.log # optional, defaults to deco-<timestamp>.log
+  log_level: WARNING # optional, defaults to ALL
+response_variable: system_log
+```
+
+Use **Developer tools > Actions** to run the action interactively. Select the
+Deco entry there when more than one is loaded. `response_variable` is for a
+script or automation; omit it in the interactive action editor. The response
+contains the saved `path` and `line_count`. An existing file with the same name
+is overwritten; omit `filename` to use a timestamped name.
+
+Downloaded router logs are not automatically redacted and can contain
+authentication-related data as well as network/client identifiers. This is
+different from the integration's redacted Home Assistant diagnostics file.
+
+The action isn't available on firmware that uses the legacy encrypted web
+session, such as the Deco S7 firmware listed under
+[Tested Devices](#tested-devices).
+
+Since v3.15.2, plain-text, gzip-compressed and tar-packaged log snapshots are
+decoded automatically, including compressed responses without a correct
+`Content-Encoding` header. This applies to both manual downloads and syslog
+forwarding, including the reported BE65 and BE9300 firmware variants. Only
+the selected regular log file is read from an archive; nothing is extracted
+to disk. No configuration changes are required.
+
+<!-- ha-marketplace:exclude-start -->
+
 {% if not installed %}
 
 ## Installation
 
-### HACS
+### Marketplace / HACS
+
+For Home Assistant 2026.11 and later:
+
+1. Open **Settings > Marketplace**.
+2. Search for **TP-Link Deco**.
+3. Select the integration and choose **Install**.
+
+For Home Assistant 2026.10 and earlier, follow the same steps under **HACS > Integrations**.
+
+The button below opens this repository in Marketplace on Home Assistant 2026.11 and later, and in HACS on older versions:
 
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=amosyuen&repository=ha-tplink-deco&category=integration)
 
@@ -217,7 +366,15 @@ target:
 5. Place the files you downloaded in the new directory (folder) you created.
 6. Restart Home Assistant
 
+When updating manually, back up the existing integration directory, use all
+files from the same published release (including new modules and translation
+files), and restart Home Assistant fully. Do not delete the configured
+integration or its entity registry to update the files. Do not mix files from
+different releases or copy an extra nested `tplink_deco` directory.
+
 {% endif %}
+
+<!-- ha-marketplace:exclude-end -->
 
 ## Configuration (Important! Please Read)
 
@@ -246,7 +403,7 @@ Recommend that you create a separate manager account with full permissions to ma
 7. Log out of the app
 8. Login using the new manager account you've just created
 
-### Timeout Secounds
+### Timeout Seconds
 
 How many seconds to wait until request times out. You can increase this if you get a lot of timeout errors from your router.
 
@@ -346,6 +503,7 @@ message: "device_tracker.amos_phone_wifi connected to main 5G through Guest Room
 - Deco P9
 - Deco PX50
 - Deco S4
+- Deco S7 (1.3.0 Build 20220609 Rel. 64814)
 - Deco X20
 - Deco X50
 - Deco X60
@@ -356,11 +514,31 @@ message: "device_tracker.amos_phone_wifi connected to main 5G through Guest Room
 - Mercusys Halo H70X
 - Mercusys Halo H80X
 
-## Not Working Devices
-
-- Deco S7 (1.3.0 Build 20220609 Rel. 64814)
+The Deco S7 firmware listed above uses a legacy encrypted local-web session over
+HTTP. The integration detects and handles this authentication and request format,
+including numeric values returned as strings by the legacy API.
 
 ## Known Issues
+
+### Syslog sends nothing or reports the 1000-line cap
+
+The receiver must listen on the exact host, port and UDP/TCP protocol configured
+in the integration. Inbound firewall rules must match that protocol, and a VPN
+or network isolation can prevent delivery. The first successful download after
+enabling forwarding only records a starting point; allow a later poll to send
+new lines. The default interval is five minutes.
+
+A successful UDP send does not confirm receipt. On v3.15.0 through v3.15.2,
+cap warnings mean older excess lines were skipped; update to v3.15.3 or newer
+for chronological, checkpointed batches. See the
+[syslog guide](https://github.com/amosyuen/ha-tplink-deco/wiki/Syslog) for details.
+
+### Deprecated connection-class warning
+
+The `CONN_CLASS_CLOUD_POLL` warning from this integration is resolved in
+v3.15.0. Update all integration files and fully restart Home Assistant. An old
+log entry can remain visible after the fix; check its timestamp. Warnings
+from other integrations require fixes in those integrations.
 
 ### Timeout Error
 
@@ -379,6 +557,16 @@ You may see extra devices show up under the Tp-Link deco integration as per http
 If you want to contribute to this please read the [Contribution guidelines](https://github.com/amosyuen/ha-tplink-deco/blob/main/CONTRIBUTING.md)
 
 ## Credits
+
+Thank you to all contributors. The v3.15.0 system-log and compatibility work
+includes contributions from [@alunduil](https://github.com/alunduil),
+[@gappleby](https://github.com/gappleby), [@rjullien](https://github.com/rjullien),
+[@SJRepos](https://github.com/SJRepos), [@misa1515](https://github.com/misa1515)
+and [@dkwolf1](https://github.com/dkwolf1). See the release notes and commit
+history for individual contributions.
+
+[![BuyMeCoffee][buymecoffeebadge]][buymecoffee]
+[![Community Forum][forum-shield]][forum]
 
 This project was generated from [@oncleben31](https://github.com/oncleben31)'s [Home Assistant Custom Component Cookiecutter](https://github.com/oncleben31/cookiecutter-homeassistant-custom-component) template.
 
@@ -407,6 +595,11 @@ Code template was mainly taken from [@Ludeeus](https://github.com/ludeeus)'s [in
 [user_profile]: https://github.com/amosyuen
 
 ## Network inventory (home-inventory fork)
+
+The `home-inventory` branch incorporates upstream `v3.15.3` and requires Home
+Assistant 2025.12 or later. Inventory registration shares upstream’s action setup,
+and reservation reads use its authenticated session recovery. The inventory
+response schema is unchanged. MQTT publishing remains outside the integration.
 
 `tplink_deco.get_network_inventory` reads fresh Deco nodes and authoritative DHCP
 reservations through the integration's existing authenticated session. It also

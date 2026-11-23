@@ -9,12 +9,26 @@ DOMAIN = "tplink_deco"
 
 COORDINATOR_CLIENTS_KEY = "clients"
 COORDINATOR_DECOS_KEY = "decos"
+COORDINATOR_MOBILE_KEY = "mobile_data"
+COORDINATOR_WIRELESS_KEY = "wireless"
+SYSLOG_FORWARDER_KEY = "syslog_forwarder"
 
 DEFAULT_CONSIDER_HOME = DEFAULT_CONSIDER_HOME_SPAN.total_seconds()
 DEFAULT_DECO_POSTFIX = "Deco"
+DEFAULT_EXPOSE_WIFI_SSIDS = False
+DEFAULT_LINK_CLIENT_DEVICES = True
 DEFAULT_SCAN_INTERVAL = 30
 DEFAULT_TIMEOUT_ERROR_RETRIES = 1
 DEFAULT_TIMEOUT_SECONDS = 30
+DEFAULT_SYSLOG_ENABLED = False
+DEFAULT_SYSLOG_INTERVAL = 300
+DEFAULT_SYSLOG_LOG_LEVEL = "ALL"
+DEFAULT_SYSLOG_PORT = 514
+DEFAULT_SYSLOG_PROTOCOL = "udp"
+MIN_SYSLOG_INTERVAL = 60
+
+SYSLOG_PROTOCOL_TCP = "tcp"
+SYSLOG_PROTOCOL_UDP = "udp"
 
 DEVICE_TYPE_CLIENT = "client"
 DEVICE_TYPE_DECO = "deco"
@@ -22,6 +36,8 @@ DEVICE_TYPE_DECO = "deco"
 # Attributes
 ATTR_BSSID_BAND2_4 = "bssid_band2_4"
 ATTR_BSSID_BAND5 = "bssid_band5"
+ATTR_BACKHAUL_BSSID_BAND2_4 = "backhaul_bssid_band2_4"
+ATTR_BACKHAUL_BSSID_BAND5 = "backhaul_bssid_band5"
 ATTR_CONNECTION_TYPE = "connection_type"
 ATTR_DECO_DEVICE = "deco_device"
 ATTR_DECO_MAC = "deco_mac"
@@ -33,6 +49,7 @@ ATTR_INTERNET_ONLINE = "internet_online"
 ATTR_MASTER = "master"
 ATTR_SIGNAL_BAND2_4 = "signal_band2_4"
 ATTR_SIGNAL_BAND5 = "signal_band5"
+ATTR_SSID = "ssid"
 ATTR_UP_KILOBYTES_PER_S = "up_kilobytes_per_s"
 ATTR_UI_DEVICE_NAME = "ui_device_name"
 
@@ -41,6 +58,15 @@ CONF_CLIENT_PREFIX = "client_prefix"
 CONF_CLIENT_POSTFIX = "client_postfix"
 CONF_DECO_PREFIX = "deco_prefix"
 CONF_DECO_POSTFIX = "deco_postfix"
+CONF_DEVICE_LIST_INTERVAL = "device_list_interval"
+CONF_EXPOSE_WIFI_SSIDS = "expose_wifi_ssids"
+CONF_LINK_CLIENT_DEVICES = "link_client_devices"
+CONF_SYSLOG_ENABLED = "syslog_enabled"
+CONF_SYSLOG_HOST = "syslog_host"
+CONF_SYSLOG_INTERVAL = "syslog_interval"
+CONF_SYSLOG_LOG_LEVEL = "syslog_log_level"
+CONF_SYSLOG_PORT = "syslog_port"
+CONF_SYSLOG_PROTOCOL = "syslog_protocol"
 CONF_TIMEOUT_ERROR_RETRIES = "timeout_error_retries"
 CONF_TIMEOUT_SECONDS = "timeout_seconds"
 CONF_VERIFY_SSL = "verify_ssl"
@@ -53,5 +79,13 @@ SIGNAL_DECO_ADDED = f"{DOMAIN}-deco-added"
 SERVICE_REBOOT_DECO = "reboot_deco"
 SERVICE_PAUSE_POLLING = "pause_polling"
 SERVICE_RESUME_POLLING = "resume_polling"
+SERVICE_DOWNLOAD_SYSTEM_LOG = "download_system_log"
 # Platforms
-PLATFORMS = ["device_tracker", "sensor", "binary_sensor", "switch", "select"]
+PLATFORMS = [
+    "device_tracker",
+    "sensor",
+    "binary_sensor",
+    "switch",
+    "select",
+    "button",
+]

@@ -33,5 +33,13 @@ class TimeoutException(Exception):
         )
 
 
+class TransientConnectionException(Exception):
+    """Retryable connection or incomplete response exception."""
+
+
 class UnexpectedApiException(Exception):
     """Unexpected API exception"""
+
+
+class UnsupportedFirmwareException(UnexpectedApiException):
+    """The Deco firmware doesn't support the requested call."""
